@@ -219,6 +219,8 @@ def main() -> None:
         default=None,
         help="Environment seed for reproducibility",
     )
+    # ai模式
+    parser.add_argument("--agent", action="store_true", help="Run agent instead of human control")
     args = parser.parse_args()
 
     # Build environment
@@ -278,7 +280,13 @@ def main() -> None:
                 input_state.handle_keyup(event.key)
 
         if running and not game_over and not victory:
-            action = input_state.resolve_action()
+            if args.agent:
+                # 使用你的策略
+                from submissions.task3_agent import policy as agent_policy
+                action = agent_policy.act(obs, info)
+            else:
+                # 人工控制
+                action = input_state.resolve_action()
             step_count = info.get("episode", {}).get("step_count", len(history))
             obs, reward, terminated, truncated, info = env.step(action)
             history.append((step_count, action, obs, info))
@@ -295,6 +303,41 @@ def main() -> None:
         surface = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
         scaled = pygame.transform.scale(surface, (WINDOW_WIDTH, WINDOW_HEIGHT))
         display_surface.blit(scaled, (0, 0))
+
+        # 创建字体（只创建一次，放在循环外）
+        if not hasattr(main, '_font'):
+            main._font = pygame.font. Font(None, 28)
+
+        step_count = info.get("episode", {}).get("step_count", 0)
+        step_text = f"Step: {step_count}"
+        text_surface = main._font.render(step_text, True, (255, 255, 255))
+        display_surface.blit(text_surface, (10, 10))
+
+        if 'action' in locals():
+            action_name = ACTION_LABELS.get(action, f"Unknown({action})")
+            action_text = f"Action: {action_name}"
+            text_surface = main._font.render(action_text, True, (255, 255, 255))
+            display_surface.blit(text_surface, (10, 40))
+        # 玩家位置
+        agent = info.get("agent", {})
+        pos = agent.get("tile", "unknown")
+        pos_text = f"Pos: {pos}"
+        text_surface = main._font.render(pos_text, True, (255, 255, 255))
+        display_surface.blit(text_surface, (10, 70))
+
+        # 钥匙状态
+        inventory = info.get("inventory", {})
+        has_key = inventory.get("keys", 0) > 0
+        key_text = f"Key: {has_key}"
+        text_surface = main._font.render(key_text, True, (255, 255, 255))
+        display_surface.blit(text_surface, (10, 100))
+
+        # 怪物数量
+        entities = info.get("entities", {})
+        monsters = entities.get("monsters_remaining", 0)
+        monster_text = f"Monsters: {monsters}"
+        text_surface = main._font.render(monster_text, True, (255, 255, 255))
+        display_surface.blit(text_surface, (10, 130))
 
         if game_over or victory:
             font = pygame.font.SysFont(None, 28)

@@ -14,6 +14,7 @@ def train(
     batch_size: int = 64,
     epochs: int = 10,
     lr: float = 1e-3,
+    num_tile_classes: int = 12,
     device: str | None = None,
 ) -> None:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -42,7 +43,7 @@ def train(
         num_workers=0,
     )
 
-    model = make_model(num_tile_classes=12).to(device)
+    model = make_model(num_tile_classes=num_tile_classes).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
@@ -52,6 +53,7 @@ def train(
 
     for epoch in range(1, epochs + 1):
         model.train()
+
         total_loss = 0.0
         total_tiles = 0
         correct_tiles = 0
@@ -76,7 +78,12 @@ def train(
         train_loss = total_loss / len(train_set)
         train_acc = correct_tiles / total_tiles
 
-        val_loss, val_acc = evaluate_loader(model, val_loader, criterion, device)
+        val_loss, val_acc = evaluate_loader(
+            model=model,
+            loader=val_loader,
+            criterion=criterion,
+            device=device,
+        )
 
         print(
             f"epoch={epoch:03d} "
@@ -88,14 +95,17 @@ def train(
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
+
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
-                    "num_tile_classes": 12,
+                    "num_tile_classes": num_tile_classes,
                     "val_acc": val_acc,
+                    "epoch": epoch,
                 },
                 output_path,
             )
+
             print(f"saved best model to {output_path}")
 
     print(f"best_val_acc={best_val_acc:.4f}")
@@ -133,6 +143,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--num-tile-classes", type=int, default=12)
 
     args = parser.parse_args()
 
@@ -149,6 +160,7 @@ def main():
         batch_size=args.batch_size,
         epochs=args.epochs,
         lr=args.lr,
+        num_tile_classes=args.num_tile_classes,
     )
 
 if __name__ == "__main__":

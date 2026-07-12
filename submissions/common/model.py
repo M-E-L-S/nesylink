@@ -17,13 +17,13 @@ class PixelToGridNet(nn.Module):
         self.num_tile_classes = num_tile_classes
 
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2),    # 64x80
+            nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2),   # 64x80
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),   # 32x40
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # 32x40
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),  # 16x20
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), # 16x20
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1), # 8x10
+            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),# 8x10
             nn.ReLU(inplace=True),
         )
 
