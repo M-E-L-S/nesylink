@@ -196,6 +196,9 @@ class Task3Policy:
         if self.monster_killed:
             return ACTION_LEFT
 
+        if self.monster_pos[0] < 0 or self.monster_pos[1] < 0:
+            self.monster_pos = None
+
         if self.monster_pos is None:
             x, y = player_pos
             if x < 5:

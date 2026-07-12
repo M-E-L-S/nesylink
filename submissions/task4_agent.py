@@ -57,7 +57,7 @@ class Task3Policy:
 
         # ============ 1. 从 info 提取所有状态 ============
 
-        player_pos = None
+        # player_pos = None
         # if "agent" in info:
         #     agent = info["agent"]
         #     if "tile" in agent:
