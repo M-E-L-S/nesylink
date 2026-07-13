@@ -17,16 +17,18 @@ def augment_pixel_obs(pixels: torch.Tensor) -> torch.Tensor:
     """
     pixels: torch.Tensor, shape (3, 128, 160), values usually in [0, 1]
 
-    Matches evaluator color variants:
+    Robust augmentations for evaluator variants:
     - grayscale
-    - dark
-    - bright
+    - dark / bright
     - high contrast
     - inverted
+    - channel dropout / shuffle
+    - mild noise
+    - posterization-like quantization
     """
-    x = pixels.float()
+    x = pixels.float().clamp(0.0, 1.0)
 
-    mode = torch.randint(0, 6, (1,)).item()
+    mode = torch.randint(0, 10, (1,)).item()
 
     if mode == 0:
         # original
@@ -39,31 +41,49 @@ def augment_pixel_obs(pixels: torch.Tensor) -> torch.Tensor:
 
     elif mode == 2:
         # dark
-        x = x * 0.55
+        scale = torch.empty(1).uniform_(0.35, 0.75).item()
+        x = x * scale
 
     elif mode == 3:
         # bright
-        x = x * 1.35 + 15.0 / 255.0
+        scale = torch.empty(1).uniform_(1.15, 1.6).item()
+        bias = torch.empty(1).uniform_(0.02, 0.12).item()
+        x = x * scale + bias
 
     elif mode == 4:
-        # high contrast, same style as evaluator
-        x = torch.where(x > 0.5, torch.ones_like(x), torch.zeros_like(x))
+        # high contrast
+        threshold = torch.empty(1).uniform_(0.35, 0.65).item()
+        x = torch.where(x > threshold, torch.ones_like(x), torch.zeros_like(x))
 
     elif mode == 5:
         # inverted
         x = 1.0 - x
+
+    elif mode == 6:
+        # channel shuffle
+        perm = torch.randperm(3)
+        x = x[perm]
+
+    elif mode == 7:
+        # channel dropout, forces shape/brightness cues instead of exact color
+        channel = torch.randint(0, 3, (1,)).item()
+        x[channel] = x[channel] * torch.empty(1).uniform_(0.0, 0.25).item()
+
+    elif mode == 8:
+        # mild gaussian noise
+        noise_scale = torch.empty(1).uniform_(0.01, 0.06).item()
+        x = x + torch.randn_like(x) * noise_scale
+
+    elif mode == 9:
+        # posterization / redraw-like flat colors
+        levels = torch.randint(2, 6, (1,)).item()
+        x = torch.round(x * (levels - 1)) / float(levels - 1)
 
     return x.clamp(0.0, 1.0)
 
 def normalize_pixels_batch(pixels: torch.Tensor) -> torch.Tensor:
     """
     Match PixelToStatePredictor._preprocess() in infer.py.
-
-    Args:
-        pixels: torch.Tensor, shape (B, 3, H, W), values in [0, 1]
-
-    Returns:
-        normalized pixels, shape (B, 3, H, W)
     """
     pixels = pixels.float()
 
@@ -190,6 +210,7 @@ def train(
                     "epoch": epoch,
                     "input_normalization": "per_image_mean_std_clamp",
                     "color_augmentation": bool(augment),
+                    "augmentation_version": "color_channel_noise_posterize_v2",
                 },
                 output_path,
             )

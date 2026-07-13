@@ -1,4 +1,4 @@
-"""Task 3: 三房间联动 - 完全基于 info 状态（修复版）"""
+"""Task 3: 三房间联动  """
 
 import sys
 from pathlib import Path
@@ -36,13 +36,13 @@ class Task3Policy:
         self.direction = 0
         self.monsters_remaining = 0
         self.chests_remaining = 0
-        self.door_locked = True  #有锁的门默认在右边
+        self.door_locked = True  # 有锁的门默认在右边
 
         # 目标位置（使用 tile 坐标）
         self.monster_pos = None
         self.chest_pos = None
-        self.door_pos_left = [11,11]
-        self.door_pos_right = [11,11]
+        self.door_pos_left = [11, 11]
+        self.door_pos_right = [11, 11]
 
         # 状态追踪
         self.door_step = 0
@@ -57,44 +57,57 @@ class Task3Policy:
         self._step_count += 1
         state = self.predictor.predict_state(obs)
 
-        self.grid=state["grid"]
-
+        self.grid = state["grid"]
 
         player_pos = state["player_tile"]
         player_pos = None
         if "agent" in info:
-             agent = info["agent"]
-             if "tile" in agent:
-                 pos = agent["tile"]
-                 if isinstance(pos, (list, tuple)) and len(pos) == 2:
-                     player_pos = (pos[0], pos[1])
+            agent = info["agent"]
+            if "tile" in agent:
+                pos = agent["tile"]
+                if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                    player_pos = (pos[0], pos[1])
 
         if player_pos is None:
             return ACTION_RIGHT
 
         # 1.2 当前房间
         door_pos = state["doors_tile"]
-        door_remaining = state["doors_remaining"]
-        for n in range (door_remaining):
-            if door_pos[n][0] == 0 and door_pos[n][1] < self.door_pos_left[1]:
-                self.door_pos_left = door_pos[n]
-            elif door_pos[n][0] == 9 and door_pos[n][1] < self.door_pos_right[1]:
-                self.door_pos_right = door_pos[n]
+        valid_doors = self._valid_tiles(door_pos)
 
-        self.monsters_remaining = state["monsters_remaining"]
-        self.chests_remaining = state["chests_remaining"]
+        found_left = False
+        found_right = False
+
+        # 保留原始逻辑：优先找 x == 0 的左门、x == 9 的右门。
+        # 但不再使用 door_remaining 索引，避免 color/spatial 下数组长度不一致崩溃。
+        for door in valid_doors:
+            if door[0] == 0 and door[1] < self.door_pos_left[1]:
+                self.door_pos_left = [door[0], door[1]]
+                found_left = True
+            elif door[0] == 9 and door[1] < self.door_pos_right[1]:
+                self.door_pos_right = [door[0], door[1]]
+                found_right = True
+
+        # spatial 地图里门的 x 不一定刚好是 0/9。
+        # 只有在原逻辑没找到门时，才用排序兜底，尽量不影响 original。
+        if valid_doors:
+            ordered_doors = sorted(valid_doors, key=lambda p: (p[0], p[1]))
+            if not found_left and self.door_pos_left == [11, 11]:
+                self.door_pos_left = [ordered_doors[0][0], ordered_doors[0][1]]
+            if not found_right and self.door_pos_right == [11, 11]:
+                self.door_pos_right = [ordered_doors[-1][0], ordered_doors[-1][1]]
+
+        self.monsters_remaining = self._safe_int(state.get("monsters_remaining", 0), 0)
+        self.chests_remaining = self._safe_int(state.get("chests_remaining", 0), 0)
 
         # 检测怪物是否被击杀
         self.monster_killed = self.monsters_remaining == 0
 
-
         # ============ 2. 获取目标位置 ============
 
         # 2.1 怪物位置
-        self.monster_pos = state["monsters_tile"][0]  # 第一个怪物
-
-        if self.monster_pos[0] < 0 or self.monster_pos[1] < 0:
-            self.monster_pos = None
+        self.monster_pos = self._first_valid_tile(state.get("monsters_tile", []))
+        self.chest_pos = self._first_valid_tile(state.get("chests_tile", []))
 
         # ============ 3. 更新阶段 ============
         self._update_phase(info)
@@ -124,8 +137,42 @@ class Task3Policy:
         self._last_action = action
         return action
 
+    def _valid_tiles(self, tiles):
+        """从 predictor 输出中提取有效 tile，避免空数组/无效坐标导致崩溃。"""
+        result = []
+        if tiles is None:
+            return result
 
-    def _update_phase(self,  info):
+        try:
+            iterator = list(tiles)
+        except TypeError:
+            return result
+
+        for tile in iterator:
+            try:
+                if len(tile) >= 2:
+                    x = int(tile[0])
+                    y = int(tile[1])
+                    if x >= 0 and y >= 0:
+                        result.append((x, y))
+            except Exception:
+                continue
+
+        return result
+
+    def _first_valid_tile(self, tiles):
+        valid_tiles = self._valid_tiles(tiles)
+        if not valid_tiles:
+            return None
+        return valid_tiles[0]
+
+    def _safe_int(self, value, default=0):
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    def _update_phase(self, info):
         """根据当前状态更新阶段"""
 
         if self.monsters_remaining > 0:
@@ -185,14 +232,14 @@ class Task3Policy:
 
         if target_room == "monster_hall":
             target = self.door_pos_left
-            if self.door_step>20:
+            if self.door_step > 20:
                 self.door_locked = False
                 target = self.door_pos_right
         elif target_room == "key_room":
             if self.door_locked:
-              target = self.door_pos_left
+                target = self.door_pos_left
             else:
-              target = self.door_pos_right
+                target = self.door_pos_right
         else:
             target = (4, y)
 
@@ -203,14 +250,16 @@ class Task3Policy:
         if self.monster_killed:
             return ACTION_LEFT
 
+        if self.monster_pos is None:
+            return ACTION_LEFT
+
         if self.monster_pos[0] < 0 or self.monster_pos[1] < 0:
             self.monster_pos = None
+            return ACTION_LEFT
 
-        if self.monster_pos is None:
-                return ACTION_LEFT
         if is_adjacent(player_pos, self.monster_pos):
             if self.direction == 1 and self.monster_pos[0] < player_pos[0]:
-               return ACTION_ATTACK
+                return ACTION_ATTACK
             elif self.direction == 3 and self.monster_pos[1] > player_pos[1]:
                 return ACTION_ATTACK
             elif self._last_action == 0 and self.monster_pos[0] > player_pos[0]:
@@ -224,13 +273,7 @@ class Task3Policy:
         """开宝箱拿钥匙"""
         if self.has_key:
             return ACTION_RIGHT
-        chest_positions = []
-        for y in range(8):
-            for x in range(10):
-                if self.grid[y][x] == 4:  # 钥匙
-                    chest_positions.append((x, y))
 
-        self.chest_pos = chest_positions[0]
         if self.chest_pos is None:
             x, y = player_pos
             if x < 8:
@@ -249,9 +292,9 @@ class Task3Policy:
         if self.door_pos_right is None:
             return ACTION_RIGHT
         if self.door_locked:
-           return self._move_towards(player_pos, self.door_pos_right)
+            return self._move_towards(player_pos, self.door_pos_right)
         else:
-           return self._move_towards(player_pos, self.door_pos_left)
+            return self._move_towards(player_pos, self.door_pos_left)
 
     def _move_towards(self, current, target, door=False) -> int:
         """直接向目标移动"""
@@ -261,7 +304,7 @@ class Task3Policy:
         dx = target[0] - current[0]
         dy = target[1] - current[1]
 
-        if dx>=dy:
+        if dx >= dy:
             if dx > 0:
                 return ACTION_RIGHT
             elif dx < 0:
@@ -288,13 +331,10 @@ class Task3Policy:
                     return ACTION_LEFT
                 else:
                     if door:
-                        self.door_step+=1
+                        self.door_step += 1
                         return ACTION_LEFT
                     else:
                         return ACTION_RIGHT
-
-
-
 
 # ============ 评估脚本需要的接口 ============
 
