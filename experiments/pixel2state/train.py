@@ -1,12 +1,95 @@
 import argparse
+import sys
 from pathlib import Path
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, random_split
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from experiments.pixel2state.dataset import PixelGridDataset, collect_dataset
 from experiments.pixel2state.model import make_model
+
+def augment_pixel_obs(pixels: torch.Tensor) -> torch.Tensor:
+    """
+    pixels: torch.Tensor, shape (3, 128, 160), values usually in [0, 1]
+
+    Matches evaluator color variants:
+    - grayscale
+    - dark
+    - bright
+    - high contrast
+    - inverted
+    """
+    x = pixels.float()
+
+    mode = torch.randint(0, 6, (1,)).item()
+
+    if mode == 0:
+        # original
+        pass
+
+    elif mode == 1:
+        # grayscale
+        gray = 0.299 * x[0:1] + 0.587 * x[1:2] + 0.114 * x[2:3]
+        x = gray.repeat(3, 1, 1)
+
+    elif mode == 2:
+        # dark
+        x = x * 0.55
+
+    elif mode == 3:
+        # bright
+        x = x * 1.35 + 15.0 / 255.0
+
+    elif mode == 4:
+        # high contrast, same style as evaluator
+        x = torch.where(x > 0.5, torch.ones_like(x), torch.zeros_like(x))
+
+    elif mode == 5:
+        # inverted
+        x = 1.0 - x
+
+    return x.clamp(0.0, 1.0)
+
+def normalize_pixels_batch(pixels: torch.Tensor) -> torch.Tensor:
+    """
+    Match PixelToStatePredictor._preprocess() in infer.py.
+
+    Args:
+        pixels: torch.Tensor, shape (B, 3, H, W), values in [0, 1]
+
+    Returns:
+        normalized pixels, shape (B, 3, H, W)
+    """
+    pixels = pixels.float()
+
+    mean = pixels.mean(dim=(2, 3), keepdim=True)
+    std = pixels.std(dim=(2, 3), keepdim=True)
+
+    pixels = (pixels - mean) / (std + 1e-6)
+    pixels = pixels.clamp(-1.0, 1.0)
+
+    return pixels
+
+class AugmentedDataset:
+    def __init__(self, dataset, augment: bool = True):
+        self.dataset = dataset
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        pixels, grids = self.dataset[idx]
+
+        if self.augment:
+            pixels = augment_pixel_obs(pixels)
+
+        return pixels, grids
 
 def train(
     data_path: str,
@@ -16,19 +99,22 @@ def train(
     lr: float = 1e-3,
     num_tile_classes: int = 12,
     device: str | None = None,
+    augment: bool = True,
 ) -> None:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = PixelGridDataset(data_path)
+    base_dataset = PixelGridDataset(data_path)
 
-    val_size = max(1, int(len(dataset) * 0.1))
-    train_size = len(dataset) - val_size
+    val_size = max(1, int(len(base_dataset) * 0.1))
+    train_size = len(base_dataset) - val_size
 
-    train_set, val_set = random_split(
-        dataset,
+    train_base_set, val_set = random_split(
+        base_dataset,
         [train_size, val_size],
         generator=torch.Generator().manual_seed(0),
     )
+
+    train_set = AugmentedDataset(train_base_set, augment=augment)
 
     train_loader = DataLoader(
         train_set,
@@ -59,8 +145,8 @@ def train(
         correct_tiles = 0
 
         for pixels, grids in train_loader:
-            pixels = pixels.to(device)
-            grids = grids.to(device)
+            pixels = normalize_pixels_batch(pixels.to(device))
+            grids = grids.to(device).long()
 
             logits = model(pixels)
             loss = criterion(logits, grids)
@@ -102,6 +188,8 @@ def train(
                     "num_tile_classes": num_tile_classes,
                     "val_acc": val_acc,
                     "epoch": epoch,
+                    "input_normalization": "per_image_mean_std_clamp",
+                    "color_augmentation": bool(augment),
                 },
                 output_path,
             )
@@ -119,8 +207,8 @@ def evaluate_loader(model, loader, criterion, device):
     correct_tiles = 0
 
     for pixels, grids in loader:
-        pixels = pixels.to(device)
-        grids = grids.to(device)
+        pixels = normalize_pixels_batch(pixels.to(device))
+        grids = grids.to(device).long()
 
         logits = model(pixels)
         loss = criterion(logits, grids)
@@ -144,6 +232,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-tile-classes", type=int, default=12)
+    parser.add_argument(
+        "--no-augment",
+        action="store_true",
+        help="Disable color augmentation.",
+    )
 
     args = parser.parse_args()
 
@@ -161,6 +254,7 @@ def main():
         epochs=args.epochs,
         lr=args.lr,
         num_tile_classes=args.num_tile_classes,
+        augment=not args.no_augment,
     )
 
 if __name__ == "__main__":

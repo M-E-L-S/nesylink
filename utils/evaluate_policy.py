@@ -19,7 +19,9 @@ import argparse
 import importlib
 import importlib.util
 import json
+import shutil
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -32,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from nesylink.core.constants import MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH, TILE_SIZE
+from nesylink.core.world.loader import load_map
 from nesylink.env import make_env
 from nesylink.tasks import list_tasks
 
@@ -52,9 +55,20 @@ REDRAW_OBS_VARIANTS = (
 OBS_VARIANTS = COLOR_OBS_VARIANTS + REDRAW_OBS_VARIANTS
 EVAL_STAGE_ORDER = {
     "original": 0,
-    "color": 1,
-    "redraw": 2,
+    "spatial": 1,
+    "color": 2,
+    "redraw": 3,
 }
+SPATIAL_TASKS = {
+    "mathematical_logic/task_1",
+    "mathematical_logic/task_2",
+    "mathematical_logic/task_3",
+}
+SPATIAL_MAP_VARIANTS = (
+    "spatial_a",
+    "spatial_b",
+    "spatial_c",
+)
 
 TASK_MILESTONES: dict[str, tuple[str, ...]] = {
     "mathematical_logic/task_3": (
@@ -103,6 +117,7 @@ class EpisodePlanEntry:
     eval_stage: str
     obs_variant: str
     seed: int
+    map_variant: str = "default"
 
 
 @dataclass
@@ -119,6 +134,7 @@ class EpisodeResult:
     terminal_reason: str | None
     event_counts: dict[str, int]
     milestones: dict[str, bool]
+    map_variant: str = "default"
 
 
 def split_policy_spec(spec: str) -> tuple[str, str | None]:
@@ -668,10 +684,15 @@ def build_episode_plan(
         ]
 
     color_variants = ["grayscale", "dark", "bright", "high_contrast", "inverted"]
-    redraw_split = num_envs // 2
     plan: list[EpisodePlanEntry] = []
     for task_id in task_ids:
-        for episode_index in range(num_envs):
+        if task_id in SPATIAL_TASKS:
+            counts = _split_episode_counts(num_envs, (0.5, 0.3, 0.1, 0.1))
+        else:
+            counts = _split_episode_counts(num_envs, (0.8, 0.0, 0.1, 0.1))
+        original_count, spatial_count, color_count, redraw_count = counts
+
+        for episode_index in range(original_count):
             plan.append(
                 EpisodePlanEntry(
                     task_id=task_id,
@@ -680,7 +701,17 @@ def build_episode_plan(
                     seed=seed + episode_index,
                 )
             )
-        for episode_index in range(num_envs):
+        for episode_index in range(spatial_count):
+            plan.append(
+                EpisodePlanEntry(
+                    task_id=task_id,
+                    eval_stage="spatial",
+                    obs_variant="default",
+                    seed=seed + episode_index,
+                    map_variant=SPATIAL_MAP_VARIANTS[episode_index % len(SPATIAL_MAP_VARIANTS)],
+                )
+            )
+        for episode_index in range(color_count):
             plan.append(
                 EpisodePlanEntry(
                     task_id=task_id,
@@ -689,17 +720,31 @@ def build_episode_plan(
                     seed=seed + episode_index,
                 )
             )
-        for episode_index in range(num_envs):
-            obs_variant = "redraw_geometric" if episode_index < redraw_split else "redraw_symbols"
+        for episode_index in range(redraw_count):
+            obs_variant = "redraw_geometric" if episode_index % 2 == 0 else "redraw_symbols"
             plan.append(
                 EpisodePlanEntry(
                     task_id=task_id,
                     eval_stage="redraw",
                     obs_variant=obs_variant,
-                    seed=seed + episode_index,
+                    seed=seed + color_count + episode_index,
                 )
             )
     return plan
+
+
+def _split_episode_counts(total: int, ratios: tuple[float, ...]) -> tuple[int, ...]:
+    raw_counts = [total * ratio for ratio in ratios]
+    counts = [int(value) for value in raw_counts]
+    remaining = total - sum(counts)
+    remainders = sorted(
+        range(len(ratios)),
+        key=lambda index: (raw_counts[index] - counts[index], ratios[index]),
+        reverse=True,
+    )
+    for index in remainders[:remaining]:
+        counts[index] += 1
+    return tuple(counts)
 
 
 def run_episode(
@@ -712,6 +757,7 @@ def run_episode(
     render_mode: str | None,
     obs_variant: str,
     action_repeat: int | None,
+    map_variant: str = "default",
 ) -> EpisodeResult:
     env_kwargs: dict[str, Any] = {
         "observation_mode": "pixels",
@@ -721,7 +767,15 @@ def run_episode(
         env_kwargs["max_steps"] = max_steps
     if action_repeat is not None:
         env_kwargs["action_repeat"] = action_repeat
-    env = make_env(task_id=task_id, **env_kwargs)
+    if map_variant == "default":
+        env = make_env(task_id=task_id, **env_kwargs)
+    else:
+        variant_map_path = materialize_spatial_map_variant(task_id, map_variant, seed=seed)
+        env = make_env(
+            map_path=variant_map_path,
+            reward_id=task_id,
+            **env_kwargs,
+        )
     reset_policy(policy, seed=seed, task_id=task_id)
 
     raw_obs, info = env.reset(seed=seed)
@@ -762,7 +816,189 @@ def run_episode(
         terminal_reason=info.get("terminal_reason"),
         event_counts=dict(sorted(event_counter.items())),
         milestones=milestones,
+        map_variant=map_variant,
     )
+
+
+def materialize_spatial_map_variant(task_id: str, variant: str, *, seed: int) -> Path:
+    if task_id not in SPATIAL_TASKS:
+        raise ValueError(f"spatial map variants are only defined for Task 1-3, got {task_id!r}")
+    if variant not in SPATIAL_MAP_VARIANTS:
+        allowed = ", ".join(SPATIAL_MAP_VARIANTS)
+        raise ValueError(f"unknown spatial map variant {variant!r}, allowed: {allowed}")
+
+    source_map = load_map(map_id=task_id)
+    temp_root = Path(tempfile.mkdtemp(prefix="nesylink_spatial_")) # dir="/private/tmp"
+    del seed
+
+    if source_map.name == "dungeon.json":
+        target_task_dir = temp_root / source_map.parent.name
+        shutil.copytree(source_map.parent, target_task_dir)
+        target_map = target_task_dir / "dungeon.json"
+        _patch_spatial_dungeon(task_id, variant, target_task_dir)
+        return target_map
+
+    target_map = temp_root / source_map.name
+    payload = _read_json_file(source_map)
+    _patch_spatial_room(task_id, variant, payload)
+    _write_json_file(target_map, payload)
+    return target_map
+
+
+def _patch_spatial_dungeon(task_id: str, variant: str, task_dir: Path) -> None:
+    del task_id
+    patches = _task3_spatial_patch(variant)
+    for room_file, room_patch in patches.items():
+        path = task_dir / "rooms" / room_file
+        payload = _read_json_file(path)
+        _apply_room_patch(payload, room_patch)
+        _write_json_file(path, payload)
+
+
+def _patch_spatial_room(task_id: str, variant: str, payload: dict[str, Any]) -> None:
+    if task_id == "mathematical_logic/task_1":
+        room_patch = _task1_spatial_patch(variant)
+    elif task_id == "mathematical_logic/task_2":
+        room_patch = _task2_spatial_patch(variant)
+    else:
+        raise ValueError(f"single-room spatial variants are not defined for {task_id!r}")
+    _apply_room_patch(payload, room_patch)
+
+
+def _task1_spatial_patch(variant: str) -> dict[str, Any]:
+    patches = {
+        "spatial_a": {
+            "spawns": {"default": [6, 6], "from_south": [6, 6]},
+            "objects": {"chest_key": [2, 3]},
+            "layout": [
+                "..........",
+                "..........",
+                "#...######",
+                "..........",
+                "..#.......",
+                "######....",
+                "..........",
+                "..........",
+            ],
+        },
+        "spatial_b": {
+            "spawns": {"default": [3, 6], "from_south": [3, 6]},
+            "objects": {"chest_key": [7, 4]},
+            "layout": [
+                "..........",
+                "....#.....",
+                "##...#####",
+                "..........",
+                "..........",
+                "######....",
+                "..........",
+                "..........",
+            ],
+        },
+        "spatial_c": {
+            "spawns": {"default": [8, 6], "from_south": [8, 6]},
+            "objects": {"chest_key": [3, 1]},
+            "layout": [
+                "..........",
+                "..........",
+                "###...####",
+                "..........",
+                ".....#....",
+                "######....",
+                "..........",
+                "..........",
+            ],
+        },
+    }
+    return patches[variant]
+
+
+def _task2_spatial_patch(variant: str) -> dict[str, Any]:
+    patches = {
+        "spatial_a": {
+            "spawns": {"default": [7, 4], "from_east": [8, 4]},
+            "objects": {"chest_key": [3, 3], "monster_chaser_left": [4, 2]},
+        },
+        "spatial_b": {
+            "spawns": {"default": [6, 2], "from_east": [8, 4]},
+            "objects": {"chest_key": [2, 5], "monster_chaser_left": [5, 4]},
+        },
+        "spatial_c": {
+            "spawns": {"default": [8, 5], "from_east": [8, 4]},
+            "objects": {"chest_key": [4, 3], "monster_chaser_left": [2, 4]},
+        },
+    }
+    return patches[variant]
+
+
+def _task3_spatial_patch(variant: str) -> dict[str, dict[str, Any]]:
+    patches = {
+        "spatial_a": {
+            "start_room.json": {
+                "spawns": {"default": [5, 5], "from_west": [1, 5], "from_east": [8, 5]},
+                "objects": {"start_hint": [4, 2]},
+            },
+            "monster_hall.json": {
+                "spawns": {"default": [8, 5], "from_east": [8, 5], "from_west": [1, 5]},
+                "objects": {"hall_chaser": [4, 2]},
+            },
+            "key_room.json": {
+                "spawns": {"default": [8, 5], "from_east": [8, 5]},
+                "objects": {"return_key_chest": [4, 4]},
+            },
+        },
+        "spatial_b": {
+            "start_room.json": {
+                "spawns": {"default": [3, 3], "from_west": [1, 3], "from_east": [8, 3]},
+                "objects": {"start_hint": [5, 1]},
+            },
+            "monster_hall.json": {
+                "spawns": {"default": [8, 3], "from_east": [8, 3], "from_west": [1, 3]},
+                "objects": {"hall_chaser": [6, 5]},
+            },
+            "key_room.json": {
+                "spawns": {"default": [8, 3], "from_east": [8, 3]},
+                "objects": {"return_key_chest": [6, 2]},
+            },
+        },
+        "spatial_c": {
+            "start_room.json": {
+                "spawns": {"default": [6, 4], "from_west": [1, 4], "from_east": [8, 4]},
+                "objects": {"start_hint": [3, 1]},
+            },
+            "monster_hall.json": {
+                "spawns": {"default": [8, 4], "from_east": [8, 4], "from_west": [1, 4]},
+                "objects": {"hall_chaser": [4, 4]},
+            },
+            "key_room.json": {
+                "spawns": {"default": [8, 4], "from_east": [8, 4]},
+                "objects": {"return_key_chest": [3, 5]},
+            },
+        },
+    }
+    return patches[variant]
+
+
+def _apply_room_patch(payload: dict[str, Any], patch: dict[str, Any]) -> None:
+    if "layout" in patch:
+        payload["layout"] = patch["layout"]
+    for spawn_name, pos in patch.get("spawns", {}).items():
+        payload.setdefault("spawns", {})[spawn_name] = pos
+    object_positions = patch.get("objects", {})
+    if object_positions:
+        for entry in payload.get("objects", []):
+            object_id = entry.get("id")
+            if object_id in object_positions:
+                entry["pos"] = object_positions[object_id]
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def summarize(results: list[EpisodeResult]) -> dict[str, Any]:
@@ -781,8 +1017,10 @@ def summarize(results: list[EpisodeResult]) -> dict[str, Any]:
         milestone_successes: Counter[str] = Counter()
         progress_successes: Counter[str] = Counter()
         obs_variant_counts: Counter[str] = Counter()
+        map_variant_counts: Counter[str] = Counter()
         for result in task_results:
             obs_variant_counts.update([result.obs_variant])
+            map_variant_counts.update([result.map_variant])
             event_totals.update(result.event_counts)
             for name, achieved in result.milestones.items():
                 if achieved:
@@ -799,6 +1037,7 @@ def summarize(results: list[EpisodeResult]) -> dict[str, Any]:
             "task_id": task_id,
             "eval_stage": eval_stage,
             "obs_variant_counts": dict(sorted(obs_variant_counts.items())),
+            "map_variant_counts": dict(sorted(map_variant_counts.items())),
             "episodes": episodes,
             "success_rate": sum(result.success for result in task_results) / episodes,
             "avg_steps": sum(result.steps for result in task_results) / episodes,
@@ -822,6 +1061,7 @@ def print_summary(summary: dict[str, Any]) -> None:
         print(f"  avg_steps:    {stats['avg_steps']:.1f}")
         print(f"  avg_reward:   {stats['avg_reward']:.3f}")
         print(f"  variants:     {stats['obs_variant_counts']}")
+        print(f"  map_variants: {stats['map_variant_counts']}")
         if stats["milestone_rates"]:
             print("  milestones:")
             for name, rate in stats["milestone_rates"].items():
@@ -860,7 +1100,7 @@ def parse_args() -> argparse.Namespace:
         choices=task_ids,
         help="Task IDs to evaluate.",
     )
-    parser.add_argument("--num-envs", type=int, default=10, help="Number of episodes/env instances per task.")
+    parser.add_argument("--num-envs", type=int, default=100, help="Number of episodes/env instances per task.")
     parser.add_argument("--seed", type=int, default=0, help="Base seed. Episode seed is seed + episode index.")
     parser.add_argument("--max-steps", type=int, default=None, help="Override task max_steps during evaluation.")
     parser.add_argument("--action-repeat", type=int, default=None, help="Override task action_repeat during evaluation.")
@@ -876,8 +1116,9 @@ def parse_args() -> argparse.Namespace:
         "--robustness-suite",
         action="store_true",
         help=(
-            "Run three stages per task: num-envs original episodes, num-envs color-shift "
-            "episodes, and num-envs redraw episodes split between the two redraw presets."
+            "Run a proportional robustness suite. Task 1-3 use 50% original, 30% spatial "
+            "map perturbations, 10% color shifts, and 10% redraws. Task 4-5 use 80% "
+            "original, 10% color shifts, and 10% redraws."
         ),
     )
     parser.add_argument("--json-out", type=Path, default=None, help="Optional path for detailed JSON results.")
@@ -914,10 +1155,12 @@ def main() -> None:
             render_mode=args.render_mode,
             obs_variant=entry.obs_variant,
             action_repeat=args.action_repeat,
+            map_variant=entry.map_variant,
         )
         results.append(result)
         print(
             f"{entry.task_id} stage={entry.eval_stage} obs_variant={entry.obs_variant} "
+            f"map_variant={entry.map_variant} "
             f"seed={entry.seed} success={result.success} steps={result.steps} "
             f"reward={result.total_reward:.3f}"
         )

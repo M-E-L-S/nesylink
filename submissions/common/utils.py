@@ -2,6 +2,7 @@
 
 from collections import deque
 from typing import Tuple, List, Optional, Set
+import math
 
 # ============ NesyLink 动作空间 ============
 # 0: WAIT, 1: UP, 2: DOWN, 3: LEFT, 4: RIGHT, 5: BUTTON_A, 6: BUTTON_B
@@ -99,10 +100,13 @@ def manhattan_distance(p1: Tuple[int, int], p2: Tuple[int, int]) -> int:
     """曼哈顿距离"""
     return abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
 
+def euclidean_distance(p1: Tuple[int, int], p2: Tuple[int, int]) -> float:
+    """欧几里得距离（直线距离）"""
+    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
 def is_adjacent(p1: Tuple[int, int], p2: Tuple[int, int]) -> bool:
     """判断两个格子是否相邻（四方向）"""
-    return manhattan_distance(p1, p2) == 1
+    return 1 <= euclidean_distance(p1, p2) <= 1.5
 
 
 def get_direction_to_target(

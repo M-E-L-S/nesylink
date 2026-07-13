@@ -1,6 +1,6 @@
 # 数理逻辑任务测评说明
 
-本文档只说明策略性能测评的核心规则和固定三阶段鲁棒性测试。测评脚本的完整参数、policy 接口、JSON 字段和实现细节见 [测评脚本细节说明](evaluation-details.md)。
+本文档只说明策略性能测评的核心规则和固定比例鲁棒性测试。测评脚本的完整参数、policy 接口、JSON 字段和实现细节见 [测评脚本细节说明](evaluation-details.md)。
 
 ## 一、评分依据
 
@@ -21,15 +21,15 @@ success_rate = 成功完成任务的 episode 数 / 总 episode 数
 
 这些进度指标用于分析 agent 已经完成了哪些子目标，不替代最终成功率。
 
-## 二、固定三阶段测评
+## 二、固定比例鲁棒性测评
 
-最终使用固定三阶段鲁棒性套件：
+最终使用固定比例鲁棒性套件：
 
 ```bash
 python utils/evaluate_policy.py \
   --policy submissions/student_policy.py \
   --robustness-suite \
-  --num-envs 10 \
+  --num-envs 100 \
   --json-out results/robustness_suite_eval.json
 ```
 
@@ -42,18 +42,26 @@ python utils/evaluate_policy.py \
   --task-policy mathematical_logic/task_1=submissions/task1_agent.py \
   --task-policy mathematical_logic/task_2=submissions/task2_agent.py \
   --robustness-suite \
-  --num-envs 10
+  --num-envs 100
 ```
 
-每个 task 会运行三组测评：
+启用 `--robustness-suite` 后，`--num-envs` 表示每个 task 的总 episode 数。测评脚本会按任务难度和扰动类型切分这些 episode：
 
-| 阶段 | episode 数 | 输入图像 | 目的 |
-|---|---:|---|---|
-| `original` | 10 | 原始渲染输入 `default` | 测试能否在标准环境中完成任务 |
-| `color` | 10 | 灰度、变暗、变亮、高对比度、反色循环使用 | 测试对颜色和亮度变化的鲁棒性 |
-| `redraw` | 10 | 前 5 轮使用方案一，后 5 轮使用方案二 | 测试对角色和物体形状变化的鲁棒性 |
+| 任务 | `original` | `spatial` | `color` | `redraw` |
+|---|---:|---:|---:|---:|
+| Task 1-3 | 50% | 30% | 10% | 10% |
+| Task 4-5 | 80% | 0% | 10% | 10% |
 
-如果调整 `--num-envs`，三个阶段都会使用相同 episode 数；重画阶段会尽量在两种重画方案之间平均分配。
+例如 `--num-envs 100` 时，Task 1-3 分别运行 50 轮原始地图、30 轮坐标扰动地图、10 轮颜色变换、10 轮重画图像；Task 4-5 分别运行 80 轮原始地图、10 轮颜色变换、10 轮重画图像。若只是调试评测流程，可以临时传更小的 `--num-envs` 做 smoke test。
+
+各阶段含义如下：
+
+| 阶段 | 输入变化 | 目的 |
+|---|---|---|
+| `original` | 原始地图和原始渲染输入 `default` | 测试能否在标准环境中完成任务 |
+| `spatial` | 仅 Task 1-3 使用，扰动房间中的 spawn、障碍、怪物或宝箱位置 | 测试策略是否依赖固定坐标和固定路线 |
+| `color` | 灰度、变暗、变亮、高对比度、反色循环使用 | 测试对颜色和亮度变化的鲁棒性 |
+| `redraw` | 使用几何重画或符号重画 | 测试对角色和物体形状变化的鲁棒性 |
 
 ## 三、重画方案
 
@@ -80,17 +88,18 @@ mathematical_logic/task_3 [redraw]
   avg_steps:    420.5
   avg_reward:   18.300
   variants:     {'redraw_geometric': 5, 'redraw_symbols': 5}
+  map_variants: {'default': 10}
   progress:
     key_collected: 0.900
     chest_opened: 0.800
     monster_killed: 0.600
 ```
 
-报告中建议至少比较：
+最终实验报告应至少包含：
 
-- `original` 阶段成功率：标准渲染下能否完成任务。
-- `color` 阶段成功率：是否依赖固定颜色。
-- `redraw` 阶段成功率：是否依赖原始 sprite 形状。
+- Task 1-3 每个阶段的测评成功率：`original`、`spatial`、`color`、`redraw`。
+- Task 4-5 每个阶段的测评成功率：`original`、`color`、`redraw`。
+- `spatial` 阶段中使用的 `map_variants` 分布，用于说明坐标扰动样本覆盖情况。
 - `progress` 指标：即使没有最终通关，是否完成了钥匙、宝箱、怪物、出口等子目标
 
 更多参数和输出字段见 [测评脚本细节说明](evaluation-details.md)。

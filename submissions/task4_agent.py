@@ -226,7 +226,7 @@ class Task3Policy:
             else:
                 return ACTION_UP
 
-        if is_adjacent(player_pos, self.chest_pos):
+        if manhattan_distance(player_pos, self.chest_pos) == 1 :
             return ACTION_INTERACT
 
         return self._move_towards(player_pos, self.chest_pos)
@@ -249,30 +249,50 @@ class Task3Policy:
         dx = target[0] - current[0]
         dy = target[1] - current[1]
 
-
-        if dx > 0:
-            return ACTION_RIGHT
-        elif dx < 0:
-            return ACTION_LEFT
-        else:
-            if self._last_action == ACTION_RIGHT:
+        if dx>=dy:
+            if dx > 0:
                 return ACTION_RIGHT
-            elif self._last_action == ACTION_LEFT:
+            elif dx < 0:
                 return ACTION_LEFT
             else:
-                if dy > 0:
-                   return ACTION_DOWN
-                elif dy < 0:
-                   return ACTION_UP
+                if self._last_action == ACTION_RIGHT:
+                    return ACTION_RIGHT
+                elif self._last_action == ACTION_LEFT:
+                    return ACTION_LEFT
                 else:
-                   if self._last_action == ACTION_DOWN:
-                       return ACTION_DOWN
-                   elif self._last_action == ACTION_UP:
-                       return ACTION_UP
-                   else:
-                       return ACTION_WAIT
-
-
+                    if dy > 0:
+                        return ACTION_DOWN
+                    elif dy < 0:
+                        return ACTION_UP
+                    else:
+                        if self._last_action == ACTION_DOWN:
+                            return ACTION_DOWN
+                        elif self._last_action == ACTION_UP:
+                            return ACTION_UP
+                        else:
+                            return ACTION_WAIT
+        else:
+            if dx > 0:
+                return ACTION_RIGHT
+            elif dx < 0:
+                return ACTION_LEFT
+            else:
+                if self._last_action == ACTION_RIGHT:
+                    return ACTION_RIGHT
+                elif self._last_action == ACTION_LEFT:
+                    return ACTION_LEFT
+                else:
+                    if dy > 0:
+                        return ACTION_DOWN
+                    elif dy < 0:
+                        return ACTION_UP
+                    else:
+                        if self._last_action == ACTION_DOWN:
+                            return ACTION_DOWN
+                        elif self._last_action == ACTION_UP:
+                            return ACTION_UP
+                        else:
+                            return ACTION_WAIT
 
 
 # ============ 评估脚本需要的接口 ============

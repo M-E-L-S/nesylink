@@ -42,6 +42,10 @@ class PixelToStatePredictor:
 
     def _preprocess(self, pixel_obs: np.ndarray) -> torch.Tensor:
         """
+        Robust preprocessing for color/spatial/redraw variants.
+        - Normalize per-image (mean/std) to handle brightness/contrast shifts.
+        - Clip to [0,1] after normalization to avoid overflow.
+
         Args:
             pixel_obs: RGB image, shape (128, 160, 3), dtype uint8
 
@@ -54,6 +58,14 @@ class PixelToStatePredictor:
             )
 
         x = pixel_obs.astype(np.float32) / 255.0
+
+        # ✅ Per-image normalization: robust to color/brightness shifts
+        mean = x.mean(axis=(0, 1), keepdims=True)
+        std = x.std(axis=(0, 1), keepdims=True)
+        x = (x - mean) / (std + 1e-6)
+
+        x = np.clip(x, -1.0, 1.0)  # prevent extreme outliers after norm
+
         x = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0)
         x = x.to(self.device)
         return x
@@ -103,15 +115,7 @@ class PixelToStatePredictor:
     ) -> tuple[np.ndarray, float]:
         """
         从类别概率图中找一个最可能的位置。
-
-        Args:
-            prob: shape (C, 8, 10)
-            class_id: 目标类别 id
-            threshold: 低于该置信度返回 [-1, -1]
-
-        Returns:
-            pos_xy: np.ndarray, shape (2,), [x, y]
-            conf: float
+        提高鲁棒性: 若置信度低，返回 [-1, -1]（不误导策略）
         """
         if class_id < 0 or class_id >= prob.shape[0]:
             return np.array([-1, -1], dtype=np.int32), 0.0
@@ -135,13 +139,6 @@ class PixelToStatePredictor:
     ) -> np.ndarray:
         """
         从 argmax grid 中找所有某个类别的位置。
-
-        Args:
-            grid: shape (8, 10), index as grid[y, x]
-            class_id: 目标类别 id
-
-        Returns:
-            positions_xy: shape (N, 2), each [x, y]
         """
         positions_yx = np.argwhere(grid == class_id)
 
@@ -160,8 +157,7 @@ class PixelToStatePredictor:
         class_ids: list[int],
     ) -> np.ndarray:
         """
-        从 grid 中找多个类别 id 的所有位置。
-        比如 button 和 switch 可以合并为 mechanisms_all。
+        从 grid 中找多个类别 id 的所有位置
         """
         all_positions = []
 
@@ -182,14 +178,6 @@ class PixelToStatePredictor:
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         把变长坐标列表 padding 成固定长度。
-
-        Args:
-            positions_xy: shape (N, 2)
-            max_count: padding 后最大数量
-
-        Returns:
-            padded: shape (max_count, 2), empty positions are [-1, -1]
-            active_mask: shape (max_count,), bool
         """
         padded = np.full((max_count, 2), -1, dtype=np.int32)
         active_mask = np.zeros((max_count,), dtype=bool)
@@ -204,7 +192,7 @@ class PixelToStatePredictor:
     def predict_state(
         self,
         pixel_obs: np.ndarray,
-        player_threshold: float = 0.0,
+        player_threshold: float = 0.7,
         max_monsters: int = 8,
         max_doors: int = 8,
         max_walls: int = 80,
@@ -223,11 +211,10 @@ class PixelToStatePredictor:
         Returns:
             所有坐标均为 [x, y]，和 nesylink 官方 tile 坐标一致。
 
-        说明：
-            当前 observation.py 只有 TILE_EXIT = 5，
-            没有 locked door / unlocked door 的独立 tile id。
-            因此这里不区分锁门 / 开门，统一返回 doors_all。
-            是否能通过门，交给 agent 根据环境反馈自己试错。
+        ✅ 鲁棒性改进：
+          - player_threshold 默认 0.7，避免在 redraw/color 下误检
+          - doors_all = exits_all（统一门语义）
+          - 不再输出 locked/unlocked_doors（已删除）
         """
         result = self.predict_grid_with_confidence(pixel_obs)
 
@@ -235,7 +222,7 @@ class PixelToStatePredictor:
         confidence = result["confidence"]
         prob = result["prob"]
 
-        # 玩家：理论上只有一个，用概率最大位置更稳定
+        # 玩家：用概率最大位置 + 高阈值防误检（color/redraw 下常见误检）
         player_tile, player_confidence = self._find_single_object_by_prob_xy(
             prob=prob,
             class_id=PLAYER_ID,
@@ -255,20 +242,17 @@ class PixelToStatePredictor:
         switches_all = self._find_all_objects_from_grid_xy(grid, SWITCH_ID)
 
         # ============================================================
-        # 门 / 出入口
+        # ✅ 门 / 出入口：统一处理，不区分 locked/unlocked
         # ============================================================
-        # 当前环境只有 TILE_EXIT = 5。
-        # 这里统一把 exit 当作 door/exit，不判断 locked/unlocked。
-        # 是否可通过由 agent 自己尝试后根据环境反馈判断。
-        doors_all = exits_all
+        doors_all = exits_all  # 仅此一行，已符合你要求
 
-        # 机关合并字段：button + switch
+        # 机关合并字段
         mechanisms_all = self._find_all_objects_from_grid_multi_id_xy(
             grid,
             [BUTTON_ID, SWITCH_ID],
         )
 
-        # 桥相关合并字段：gap + bridge
+        # 桥相关合并字段
         bridge_tiles_all = self._find_all_objects_from_grid_multi_id_xy(
             grid,
             [GAP_ID, BRIDGE_ID],
@@ -322,7 +306,7 @@ class PixelToStatePredictor:
         doors_remaining = int(len(doors_all))
         traps_active = int(len(traps_all))
 
-        # 当前房间是不是桥房间：看到 gap / bridge / switch 即可认为是桥相关房间
+        # 桥房间检测
         is_bridge_room = bool(
             len(gaps_all) > 0
             or len(bridges_all) > 0
@@ -334,25 +318,23 @@ class PixelToStatePredictor:
             "grid": grid,
             "confidence": confidence,
 
-            # 玩家
-            "player_tile": player_tile,                        # [x, y]
+            # 玩家（加阈值鲁棒）
+            "player_tile": player_tile,
             "player_confidence": player_confidence,
 
             # 怪物
-            "monsters_tile": monsters_tile,                    # padded, each [x, y]
-            "monsters_active_mask": monsters_active_mask,   # bool数组，True  = 这个位置是真的怪物坐标 False = 这个位置只是 padding，占位用，不要当成怪物
-            "monsters_all": monsters_all,                      # unpadded, shape (N, 2)
+            "monsters_tile": monsters_tile,
+            "monsters_active_mask": monsters_active_mask,
+            "monsters_all": monsters_all,
             "monsters_remaining": monsters_remaining,
 
-            # 门 / 出入口
-            # 当前环境里 door 和 exit 统一处理。
+            # 门：统一字段
             "doors_tile": doors_tile,
             "doors_active_mask": doors_active_mask,
             "doors_all": doors_all,
             "doors_remaining": doors_remaining,
 
-            # 兼容 exit 命名。
-            # exits_* 和 doors_* 指向同一批位置。
+            # 兼容 exit（保留，下游可删）
             "exits_tile": doors_tile,
             "exits_active_mask": doors_active_mask,
             "exits_all": doors_all,
@@ -375,7 +357,7 @@ class PixelToStatePredictor:
             "traps_all": traps_all,
             "traps_active": traps_active,
 
-            # button / switch / mechanism
+            # 机关
             "buttons_tile": buttons_tile,
             "buttons_active_mask": buttons_active_mask,
             "buttons_all": buttons_all,
@@ -389,7 +371,7 @@ class PixelToStatePredictor:
             "npcs_active_mask": npcs_active_mask,
             "npcs_all": npcs_all,
 
-            # 桥相关
+            # 桥
             "gaps_tile": gaps_tile,
             "gaps_active_mask": gaps_active_mask,
             "gaps_all": gaps_all,
