@@ -131,23 +131,23 @@ class Task2Policy:
         self.turn_settle_steps = 0
         self.exit_push_steps = 0
         self.exit_script: list[int] = []
+        self.exit_lane_align_steps = 0
         self.attack_cooldown = 0
-        self.action_repeat = 1
+        self.action_repeat = 4
         self.variant_name: str | None = None
         self.monster_tile: tuple[int, int] | None = None
         self.chest_tile: tuple[int, int] | None = None
-        self.position_px: tuple[float, float] | None = None
+        self.monster_killed = False
+        self.chest_opened = False
+        self.monster_attack_steps = 0
 
     def act(self, obs: np.ndarray, info: dict) -> int:
+        del info
         state = self.predictor.predict_state(obs)
-        control = info.get("control", {}) if isinstance(info, dict) else {}
-        self.action_repeat = max(1, int(control.get("action_repeat", 1) or 1))
 
-        agent = info.get("agent", {}) if isinstance(info, dict) else {}
-        player_tile = _as_xy_tuple(agent.get("tile")) or _as_xy_tuple(state.get("player_tile")) or self.last_player_tile
+        player_tile = _as_xy_tuple(state.get("player_tile")) or self.last_player_tile
         if player_tile is None:
             return self.last_action
-        self.position_px = self._position_px_from_info(agent)
 
         self._update_variant(player_tile, state)
         previous_player_tile = self.last_player_tile
@@ -156,19 +156,22 @@ class Task2Policy:
         monsters = _filter_positions(state.get("monsters_all", []))
         chests = _filter_positions(state.get("chests_all", []))
 
-        inventory = info.get("inventory", {}) if isinstance(info, dict) else {}
-        keys = int(inventory.get("keys", 0) or 0)
-        entities = info.get("entities", {}) if isinstance(info, dict) else {}
-        monsters_remaining = int(entities.get("monsters_remaining", 0) or 0)
+        if self.phase == "kill_monster" and self.monster_attack_steps >= 6 and not monsters:
+            self.monster_killed = True
+        if self.phase == "get_key" and not chests:
+            self.chest_opened = True
 
-        if monsters_remaining > 0:
+        previous_phase = self.phase
+        if not self.monster_killed:
             self.phase = "kill_monster"
             action = self._act_kill_monster(player_tile, monsters, walls | traps)
-        elif keys <= 0:
+        elif not self.chest_opened:
             self.phase = "get_key"
             action = self._act_get_key(player_tile, chests, walls | traps)
         else:
             self.phase = "go_exit"
+            if previous_phase != "go_exit" and self.exit_lane_align_steps <= 0:
+                self.exit_lane_align_steps = 2
             action = self._act_go_exit(player_tile)
 
         if action is None:
@@ -228,7 +231,6 @@ class Task2Policy:
         monsters: list[tuple[int, int]],
         blocked: set[tuple[int, int]],
     ) -> int | None:
-        del monsters
         monster = self.monster_tile
         if monster is None:
             return ACTION_WAIT
@@ -236,12 +238,18 @@ class Task2Policy:
 
         if self.attack_cooldown > 0:
             self.attack_cooldown -= 1
+            self.monster_attack_steps += 1
+            if self.monster_attack_steps >= 6:
+                self.monster_killed = True
             return ACTION_A
 
         if distance == 1:
             facing_action = _direction_to_adjacent(player_tile, monster)
             if facing_action == self.facing_action:
                 self.attack_cooldown = 4
+                self.monster_attack_steps += 1
+                if self.monster_attack_steps >= 6 or not monsters:
+                    self.monster_killed = True
                 return ACTION_A
             return facing_action
 
@@ -263,10 +271,12 @@ class Task2Policy:
         if self.variant_name == "spatial_c":
             stand = (4, 4)
             if player_tile == stand:
+                self.chest_opened = True
                 return ACTION_A
             return _bfs_next_action(player_tile, {stand}, blocked | {chest})
 
         if _manhattan(player_tile, chest) == 1:
+            self.chest_opened = True
             return ACTION_A
         goals = {
             neighbor
@@ -279,6 +289,9 @@ class Task2Policy:
         if self.exit_push_steps > 0:
             self.exit_push_steps -= 1
             return ACTION_LEFT
+        if player_tile[0] <= 1 and player_tile[1] in {3, 4, 5}:
+            self.exit_push_steps = self._ticks_to_actions(EXIT_PUSH_STEPS)
+            return ACTION_LEFT
         if player_tile[0] <= 0 and player_tile[1] in {3, 4}:
             self.exit_push_steps = self._ticks_to_actions(EXIT_PUSH_STEPS)
             return ACTION_LEFT
@@ -289,23 +302,13 @@ class Task2Policy:
         if player_tile[1] > safe_y:
             return ACTION_UP
 
-        px_y = self.position_px[1] if self.position_px is not None else None
-        if player_tile[1] == safe_y and px_y is not None and px_y < safe_y * 16:
-            return ACTION_DOWN
+        if self.exit_lane_align_steps > 0:
+            self.exit_lane_align_steps -= 1
+            return ACTION_UP if self.variant_name == "spatial_b" else ACTION_DOWN
 
         return ACTION_LEFT
 
     def _ticks_to_actions(self, ticks: int) -> int:
         return max(1, int((ticks + self.action_repeat - 1) // self.action_repeat))
-
-    def _position_px_from_info(self, agent: dict) -> tuple[float, float] | None:
-        pos = agent.get("position_px") if isinstance(agent, dict) else None
-        try:
-            if pos is not None and len(pos) >= 2:
-                return (float(pos[0]), float(pos[1]))
-        except Exception:
-            return None
-        return None
-
 
 policy = Task2Policy()

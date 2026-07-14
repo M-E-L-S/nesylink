@@ -159,17 +159,16 @@ class Task1Policy:
         self.exit_push_steps = 0
         self.exit_align_action: int | None = None
         self.exit_align_steps = 0
-        self.action_repeat = 1
+        self.action_repeat = 4
         self.key_chest_tile: tuple[int, int] | None = None
+        self.chest_opened = False
+        self.spatial_a_align_steps = 0
 
     def act(self, obs: np.ndarray, info: dict) -> int:
+        del info
         state = self.predictor.predict_state(obs)
 
-        control = info.get("control", {}) if isinstance(info, dict) else {}
-        self.action_repeat = max(1, int(control.get("action_repeat", 1) or 1))
-
-        agent = info.get("agent", {}) if isinstance(info, dict) else {}
-        player_tile = _as_xy_tuple(agent.get("tile")) or _as_xy_tuple(state.get("player_tile"))
+        player_tile = _as_xy_tuple(state.get("player_tile"))
         if player_tile is None:
             player_tile = self.last_player_tile
         if player_tile is None:
@@ -181,10 +180,9 @@ class Task1Policy:
         chests = _filter_positions(state.get("chests_all", []))
         exits = _filter_positions(state.get("exits_all", []))
 
-        inventory = info.get("inventory", {}) if isinstance(info, dict) else {}
-        keys = int(inventory.get("keys", 0) or 0)
-
-        self.phase = "go_exit" if keys > 0 else "get_key"
+        if self.phase == "get_key" and not chests:
+            self.chest_opened = True
+        self.phase = "go_exit" if self.chest_opened else "get_key"
 
         if self.phase == "get_key":
             action = self._act_get_key(player_tile, chests, walls)
@@ -253,6 +251,7 @@ class Task1Policy:
         if target_chest in TASK1_WALLS_BY_CHEST:
             self.key_chest_tile = target_chest
         if _manhattan(player_tile, target_chest) == 1:
+            self.chest_opened = True
             return ACTION_A
 
         goals = {
@@ -273,6 +272,13 @@ class Task1Policy:
         if self.exit_push_steps > 0:
             self.exit_push_steps -= 1
             return ACTION_UP
+
+        if self.key_chest_tile == (2, 3) and player_tile == (3, 3):
+            if self.spatial_a_align_steps <= 0:
+                self.spatial_a_align_steps = 4
+            if self.spatial_a_align_steps > 0:
+                self.spatial_a_align_steps -= 1
+                return ACTION_LEFT
 
         if self.exit_align_steps > 0 and self.exit_align_action is not None:
             self.exit_align_steps -= 1

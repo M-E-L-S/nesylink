@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from collections import deque
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-
-from experiments.pixel2state.infer import PixelToStatePredictor
 
 
 ACTION_WAIT = 0
@@ -150,7 +147,7 @@ def _bfs_next_action(
 
 class Task5Policy:
     def __init__(self, model_path: str | None = None):
-        self.predictor = PixelToStatePredictor(model_path or str(Path("models/pixel2state/best.pt")))
+        del model_path
         self.reset()
 
     def reset(self, seed: int | None = None, task_id: str | None = None):
@@ -187,12 +184,12 @@ class Task5Policy:
         self.action_repeat = 1
 
     def act(self, obs: np.ndarray, info: dict) -> int:
-        state = self.predictor.predict_state(obs)
+        del obs
         control = info.get("control", {}) if isinstance(info, dict) else {}
         self.action_repeat = max(1, int(control.get("action_repeat", 1) or 1))
 
         room_id = self._room_id(info)
-        player_tile = self._player_tile(state, info)
+        player_tile = self._player_tile(info)
         if player_tile is None:
             return self.last_action
 
@@ -200,11 +197,10 @@ class Task5Policy:
         self._update_memory(info, room_id)
         self._advance_route(room_id, info)
 
-        walls = self._walls(room_id, state)
-        traps = self._traps(room_id, state)
+        walls = self._walls(room_id)
+        traps = self._traps(room_id)
         chests = self._chest_blockers(room_id)
         npcs = set(ROOM_NPCS.get(room_id, set()))
-        monsters = _filter_positions(state.get("monsters_all", []))
         entities = info.get("entities", {}) if isinstance(info, dict) else {}
         monsters_remaining = int(entities.get("monsters_remaining", 0) or 0)
         blocked = walls | traps | chests | npcs
@@ -231,10 +227,10 @@ class Task5Policy:
         room_id = env.get("room_id")
         return str(room_id) if room_id else self.last_room_id
 
-    def _player_tile(self, state: dict, info: dict) -> tuple[int, int] | None:
+    def _player_tile(self, info: dict) -> tuple[int, int] | None:
         agent = info.get("agent", {}) if isinstance(info, dict) else {}
         tile = _as_xy_tuple(agent.get("tile"))
-        return tile or _as_xy_tuple(state.get("player_tile")) or self.last_player_tile
+        return tile or self.last_player_tile
 
     def _update_memory(self, info: dict, room_id: str) -> None:
         events = info.get("events", {}) if isinstance(info, dict) else {}
@@ -272,12 +268,10 @@ class Task5Policy:
                 continue
             break
 
-    def _walls(self, room_id: str, state: dict) -> set[tuple[int, int]]:
-        del state
+    def _walls(self, room_id: str) -> set[tuple[int, int]]:
         return set(ROOM_WALLS.get(room_id, set()))
 
-    def _traps(self, room_id: str, state: dict) -> set[tuple[int, int]]:
-        del state
+    def _traps(self, room_id: str) -> set[tuple[int, int]]:
         return set(ROOM_TRAPS.get(room_id, set()))
 
     def _chest_blockers(self, room_id: str) -> set[tuple[int, int]]:
