@@ -12,6 +12,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib
+import importlib.util
 import sys
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -36,6 +38,68 @@ from nesylink.core.input import HumanInputState
 from nesylink.tasks import list_tasks 
 
 HISTORY_SIZE = 5 # set the number of past steps to keep in history for inspection
+
+
+def _load_module(target: str):
+    path = Path(target)
+    if path.suffix == ".py" or path.exists():
+        module_path = path if path.is_absolute() else Path(_project_root) / path
+        if not module_path.exists():
+            raise FileNotFoundError(f"policy file not found: {module_path}")
+        module_name = f"_nesylink_human_policy_{module_path.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"could not load policy module from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    return importlib.import_module(target)
+
+
+def load_policy(policy_spec: str):
+    if ":" in policy_spec:
+        target, attr = policy_spec.rsplit(":", 1)
+    else:
+        target, attr = policy_spec, None
+    module = _load_module(target)
+    candidate_names = (attr,) if attr else ("make_policy", "Policy", "policy", "act")
+    for name in candidate_names:
+        if name is None or not hasattr(module, name):
+            continue
+        candidate = getattr(module, name)
+        if name == "make_policy":
+            return candidate()
+        if name == "Policy" and isinstance(candidate, type):
+            return candidate()
+        return candidate
+    raise AttributeError(f"policy module must expose one of: {', '.join(candidate_names)}")
+
+
+def reset_policy(policy, *, seed: int | None, task_id: str) -> None:
+    reset = getattr(policy, "reset", None)
+    if reset is None:
+        return
+    try:
+        reset(seed=seed, task_id=task_id)
+    except TypeError:
+        try:
+            reset(seed=seed)
+        except TypeError:
+            reset()
+
+
+def call_policy(policy, obs, info) -> int:
+    actor = policy.act if hasattr(policy, "act") else policy
+    try:
+        action = actor(obs, info)
+    except TypeError:
+        action = actor(obs)
+    if isinstance(action, dict):
+        action = action.get("action")
+    if isinstance(action, (tuple, list)) and action:
+        action = action[0]
+    return int(np.asarray(action).item())
 
 
 # ─── Diff helpers ────────────────────────────────────────────────────────────
@@ -221,6 +285,11 @@ def main() -> None:
     )
     # ai模式
     parser.add_argument("--agent", action="store_true", help="Run agent instead of human control")
+    parser.add_argument(
+        "--policy",
+        default="submissions/task3_agent.py",
+        help="Policy module/file for --agent mode, optionally with :attribute.",
+    )
     args = parser.parse_args()
 
     # Build environment
@@ -231,6 +300,9 @@ def main() -> None:
         env = nesylink.make_env(task_id=args.task, **kwargs)
 
     obs, info = env.reset(seed=args.seed)
+    agent_policy = load_policy(args.policy) if args.agent else None
+    if agent_policy is not None:
+        reset_policy(agent_policy, seed=args.seed, task_id=args.task)
     print(f"\n[Loaded task: {args.task}]")
     print(f"[Mission: {info.get('env', {}).get('map_id', 'N/A')}]")
     print(f"[Controls: Arrows=move, Z=A(sword/interact), X=B(shield), Tab=dump last {HISTORY_SIZE} steps, Esc=quit]\n")
@@ -251,6 +323,8 @@ def main() -> None:
     def reset_episode() -> None:
         nonlocal obs, info, game_over, victory
         obs, info = env.reset(seed=args.seed)
+        if agent_policy is not None:
+            reset_policy(agent_policy, seed=args.seed, task_id=args.task)
         history.clear()
         game_over = False
         victory = False
@@ -282,8 +356,7 @@ def main() -> None:
         if running and not game_over and not victory:
             if args.agent:
                 # 使用你的策略
-                from submissions.task3_agent import policy as agent_policy
-                action = agent_policy.act(obs, info)
+                action = call_policy(agent_policy, obs, info)
             else:
                 # 人工控制
                 action = input_state.resolve_action()
