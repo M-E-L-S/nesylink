@@ -59,25 +59,14 @@ class Task3Policy:
 
         self.grid = state["grid"]
 
+        player_pos = state["player_tile"]
         player_pos = None
-
-        if state is not None and "player_tile" in state:
-            pos = state["player_tile"]
-
-            if pos is not None and len(pos) == 2:
-                x = int(pos[0])
-                y = int(pos[1])
-
-                if x >= 0 and y >= 0:
-                    player_pos = (x, y)
-
-        # player_pos = None
-        # if "agent" in info:
-        #     agent = info["agent"]
-        #     if "tile" in agent:
-        #         pos = agent["tile"]
-        #         if isinstance(pos, (list, tuple)) and len(pos) == 2:
-        #             player_pos = (pos[0], pos[1])
+        if "agent" in info:
+            agent = info["agent"]
+            if "tile" in agent:
+                pos = agent["tile"]
+                if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                    player_pos = (pos[0], pos[1])
 
         if player_pos is None:
             return ACTION_RIGHT
@@ -130,6 +119,16 @@ class Task3Policy:
             self.steps_since_phase_change = 0
 
         action = self._execute_phase(player_pos)
+
+        # if self._step_count < 20:
+        #     print("=== TASK3 DEBUG ===")
+        #     print("step:", self._step_count)
+        #     print("phase:", self.phase)
+        #     print("player:", state["player_tile"])
+        #     print("monsters_all:", state["monsters_all"], "remaining:", state["monsters_remaining"])
+        #     print("chests_all:", state["chests_all"], "remaining:", state["chests_remaining"])
+        #     print("doors_all:", state["doors_all"])
+        #     print("action:", action)
 
         # 安全检查
         if action is None or not isinstance(action, int):
@@ -269,13 +268,13 @@ class Task3Policy:
             return ACTION_LEFT
 
         if is_adjacent(player_pos, self.monster_pos):
+            if self.direction == 0 and self.monster_pos[0] > player_pos[0]:
+                return ACTION_ATTACK
             if self.direction == 1 and self.monster_pos[0] < player_pos[0]:
                 return ACTION_ATTACK
-            elif self.direction == 3 and self.monster_pos[1] > player_pos[1]:
+            if self.direction == 2 and self.monster_pos[1] < player_pos[1]:
                 return ACTION_ATTACK
-            elif self._last_action == 0 and self.monster_pos[0] > player_pos[0]:
-                return ACTION_ATTACK
-            elif self._last_action == 2 and self.monster_pos[1] < player_pos[1]:
+            if self.direction == 3 and self.monster_pos[1] > player_pos[1]:
                 return ACTION_ATTACK
 
         return self._move_towards(player_pos, self.monster_pos)
@@ -308,36 +307,44 @@ class Task3Policy:
             return self._move_towards(player_pos, self.door_pos_left)
 
     def _move_towards(self, current, target, door=False) -> int:
+        """直接向目标移动"""
         if target is None:
             return ACTION_RIGHT
 
-        dx = int(target[0]) - int(current[0])
-        dy = int(target[1]) - int(current[1])
+        dx = target[0] - current[0]
+        dy = target[1] - current[1]
 
-        if abs(dx) >= abs(dy):
+        if dx >= dy:
             if dx > 0:
                 return ACTION_RIGHT
-            if dx < 0:
+            elif dx < 0:
                 return ACTION_LEFT
-            if dy > 0:
-                return ACTION_DOWN
-            if dy < 0:
-                return ACTION_UP
+            else:
+                if dy > 0:
+                    return ACTION_DOWN
+                elif dy < 0:
+                    return ACTION_UP
+                else:
+                    if door:
+                        return ACTION_LEFT
+                    else:
+                        return ACTION_RIGHT
         else:
             if dy > 0:
                 return ACTION_DOWN
-            if dy < 0:
+            elif dy < 0:
                 return ACTION_UP
-            if dx > 0:
-                return ACTION_RIGHT
-            if dx < 0:
-                return ACTION_LEFT
-
-        if door:
-            self.door_step += 1
-            return ACTION_LEFT
-
-        return ACTION_RIGHT
+            else:
+                if dx > 0:
+                    return ACTION_RIGHT
+                elif dx < 0:
+                    return ACTION_LEFT
+                else:
+                    if door:
+                        self.door_step += 1
+                        return ACTION_LEFT
+                    else:
+                        return ACTION_RIGHT
 
 # ============ 评估脚本需要的接口 ============
 
