@@ -59,14 +59,25 @@ class Task3Policy:
 
         self.grid = state["grid"]
 
-        player_pos = state["player_tile"]
         player_pos = None
-        if "agent" in info:
-            agent = info["agent"]
-            if "tile" in agent:
-                pos = agent["tile"]
-                if isinstance(pos, (list, tuple)) and len(pos) == 2:
-                    player_pos = (pos[0], pos[1])
+
+        if state is not None and "player_tile" in state:
+            pos = state["player_tile"]
+
+            if pos is not None and len(pos) == 2:
+                x = int(pos[0])
+                y = int(pos[1])
+
+                if x >= 0 and y >= 0:
+                    player_pos = (x, y)
+
+        # player_pos = None
+        # if "agent" in info:
+        #     agent = info["agent"]
+        #     if "tile" in agent:
+        #         pos = agent["tile"]
+        #         if isinstance(pos, (list, tuple)) and len(pos) == 2:
+        #             player_pos = (pos[0], pos[1])
 
         if player_pos is None:
             return ACTION_RIGHT
@@ -297,44 +308,36 @@ class Task3Policy:
             return self._move_towards(player_pos, self.door_pos_left)
 
     def _move_towards(self, current, target, door=False) -> int:
-        """直接向目标移动"""
         if target is None:
             return ACTION_RIGHT
 
-        dx = target[0] - current[0]
-        dy = target[1] - current[1]
+        dx = int(target[0]) - int(current[0])
+        dy = int(target[1]) - int(current[1])
 
-        if dx >= dy:
+        if abs(dx) >= abs(dy):
             if dx > 0:
                 return ACTION_RIGHT
-            elif dx < 0:
+            if dx < 0:
                 return ACTION_LEFT
-            else:
-                if dy > 0:
-                    return ACTION_DOWN
-                elif dy < 0:
-                    return ACTION_UP
-                else:
-                    if door:
-                        return ACTION_LEFT
-                    else:
-                        return ACTION_RIGHT
+            if dy > 0:
+                return ACTION_DOWN
+            if dy < 0:
+                return ACTION_UP
         else:
             if dy > 0:
                 return ACTION_DOWN
-            elif dy < 0:
+            if dy < 0:
                 return ACTION_UP
-            else:
-                if dx > 0:
-                    return ACTION_RIGHT
-                elif dx < 0:
-                    return ACTION_LEFT
-                else:
-                    if door:
-                        self.door_step += 1
-                        return ACTION_LEFT
-                    else:
-                        return ACTION_RIGHT
+            if dx > 0:
+                return ACTION_RIGHT
+            if dx < 0:
+                return ACTION_LEFT
+
+        if door:
+            self.door_step += 1
+            return ACTION_LEFT
+
+        return ACTION_RIGHT
 
 # ============ 评估脚本需要的接口 ============
 

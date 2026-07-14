@@ -508,7 +508,7 @@ class PixelToStatePredictor:
     def predict_state(
         self,
         pixel_obs: np.ndarray,
-        player_threshold: float = 0.25,
+        player_threshold: float = 0.0,
         max_monsters: int = 8,
         max_doors: int = 8,
         max_walls: int = 80,
