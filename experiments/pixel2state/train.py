@@ -13,23 +13,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from experiments.pixel2state.dataset import PixelGridDataset, collect_dataset
 from experiments.pixel2state.model import make_model
 
-# ============================================================
-# Tile IDs from nesylink observation.py
-# ============================================================
-
-EMPTY_ID = 0
-WALL_ID = 1
-PLAYER_ID = 2
-MONSTER_ID = 3
-CHEST_ID = 4
-EXIT_ID = 5
-TRAP_ID = 6
-BUTTON_ID = 7
-NPC_ID = 8
-GAP_ID = 9
-BRIDGE_ID = 10
-SWITCH_ID = 11
-
 def augment_pixel_obs(pixels: torch.Tensor) -> torch.Tensor:
     """
     pixels: torch.Tensor, shape (3, 128, 160), values usually in [0, 1]
@@ -171,7 +154,6 @@ def train(
     criterion = nn.CrossEntropyLoss()
 
     best_val_acc = 0.0
-    best_player_acc = 0.0
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -209,42 +191,22 @@ def train(
             device=device,
         )
 
-        player_metrics = evaluate_player_tile_loader(
-            model=model,
-            loader=val_loader,
-            device=device,
-        )
-
-        player_acc = player_metrics["player_acc_by_prob"]
-
         print(
             f"epoch={epoch:03d} "
             f"train_loss={train_loss:.4f} "
             f"train_acc={train_acc:.4f} "
             f"val_loss={val_loss:.4f} "
-            f"val_acc={val_acc:.4f} "
-            f"player_acc_by_prob={player_metrics['player_acc_by_prob']:.4f} "
-            f"player_acc_by_argmax_grid={player_metrics['player_acc_by_argmax_grid']:.4f} "
-            f"avg_player_conf={player_metrics['avg_player_conf']:.4f} "
-            f"missing_true_player={player_metrics['missing_true_player']}"
+            f"val_acc={val_acc:.4f}"
         )
 
-        # Keep the old tile-accuracy save behavior, but record player-specific
-        # metrics so we can tell whether the model learned player_tile.
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            best_player_acc = player_acc
 
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
                     "num_tile_classes": num_tile_classes,
                     "val_acc": val_acc,
-                    "player_acc_by_prob": player_metrics["player_acc_by_prob"],
-                    "player_acc_by_argmax_grid": player_metrics[
-                        "player_acc_by_argmax_grid"
-                    ],
-                    "avg_player_conf": player_metrics["avg_player_conf"],
                     "epoch": epoch,
                     "input_normalization": "per_image_mean_std_clamp",
                     "color_augmentation": bool(augment),
@@ -256,7 +218,6 @@ def train(
             print(f"saved best model to {output_path}")
 
     print(f"best_val_acc={best_val_acc:.4f}")
-    print(f"best_player_acc_by_prob_at_saved_epoch={best_player_acc:.4f}")
 
 @torch.no_grad()
 def evaluate_loader(model, loader, criterion, device):
@@ -280,78 +241,6 @@ def evaluate_loader(model, loader, criterion, device):
         total_tiles += grids.numel()
 
     return total_loss / len(loader.dataset), correct_tiles / total_tiles
-
-@torch.no_grad()
-def evaluate_player_tile_loader(model, loader, device):
-    """
-    Evaluate whether the model can locate the player tile.
-
-    This mirrors infer.py behavior:
-    infer.py uses PLAYER_ID probability map and takes the tile with max PLAYER_ID
-    probability.
-    """
-    model.eval()
-
-    total = 0
-    correct_by_player_prob = 0
-    correct_by_argmax_grid = 0
-    missing_true_player = 0
-    avg_player_conf = 0.0
-
-    for pixels, grids in loader:
-        pixels = normalize_pixels_batch(pixels.to(device))
-        grids = grids.to(device).long()
-
-        logits = model(pixels)
-        prob = torch.softmax(logits, dim=1)
-        pred_grid = logits.argmax(dim=1)
-
-        batch_size = grids.size(0)
-
-        for i in range(batch_size):
-            true_pos = torch.nonzero(grids[i] == PLAYER_ID, as_tuple=False)
-
-            if true_pos.numel() == 0:
-                missing_true_player += 1
-                continue
-
-            true_y = int(true_pos[0, 0].item())
-            true_x = int(true_pos[0, 1].item())
-
-            player_prob = prob[i, PLAYER_ID]
-            flat_idx = int(player_prob.reshape(-1).argmax().item())
-            pred_y = flat_idx // player_prob.shape[1]
-            pred_x = flat_idx % player_prob.shape[1]
-
-            avg_player_conf += float(player_prob[pred_y, pred_x].item())
-
-            if pred_x == true_x and pred_y == true_y:
-                correct_by_player_prob += 1
-
-            argmax_pos = torch.nonzero(pred_grid[i] == PLAYER_ID, as_tuple=False)
-            if argmax_pos.numel() > 0:
-                argmax_y = int(argmax_pos[0, 0].item())
-                argmax_x = int(argmax_pos[0, 1].item())
-
-                if argmax_x == true_x and argmax_y == true_y:
-                    correct_by_argmax_grid += 1
-
-            total += 1
-
-    if total == 0:
-        return {
-            "player_acc_by_prob": 0.0,
-            "player_acc_by_argmax_grid": 0.0,
-            "avg_player_conf": 0.0,
-            "missing_true_player": missing_true_player,
-        }
-
-    return {
-        "player_acc_by_prob": correct_by_player_prob / total,
-        "player_acc_by_argmax_grid": correct_by_argmax_grid / total,
-        "avg_player_conf": avg_player_conf / total,
-        "missing_true_player": missing_true_player,
-    }
 
 def main():
     parser = argparse.ArgumentParser()
