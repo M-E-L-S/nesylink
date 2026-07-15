@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from experiments.pixel2state.model import make_model
-
+# 暂时禁用redraw特判
 EMPTY_ID = 0
 WALL_ID = 1
 PLAYER_ID = 2
