@@ -1,4 +1,4 @@
-"""Task 3: 三房间联动  """
+"""Task 3  """
 
 import sys
 from pathlib import Path
@@ -17,9 +17,6 @@ from submissions.common.utils import (
 from experiments.pixel2state.infer import PixelToStatePredictor
 
 class Task3Policy:
-    """
-    Task 3: 三房间联动
-    """
 
     def __init__(self, model_path: str = None):
         self.predictor = PixelToStatePredictor("models/pixel2state/best.pt")
@@ -37,6 +34,7 @@ class Task3Policy:
         self.monsters_remaining = 0
         self.chests_remaining = 0
         self.door_locked = True  # 有锁的门默认在右边
+
 
         # 目标位置（使用 tile 坐标）
         self.monster_pos = None
@@ -58,8 +56,6 @@ class Task3Policy:
         state = self.predictor.predict_state(obs)
 
         self.grid = state["grid"]
-
-        player_pos = state["player_tile"]
         player_pos = None
         if "agent" in info:
             agent = info["agent"]
@@ -68,8 +64,20 @@ class Task3Policy:
                 if isinstance(pos, (list, tuple)) and len(pos) == 2:
                     player_pos = (pos[0], pos[1])
 
-        if player_pos is None:
-            return ACTION_RIGHT
+        player_pos = state["player_tile"]
+        if player_pos[0] < 0 or player_pos[1] <0 :
+            if self.current_room == "start_room" and self.phase == "go_monster_hall":
+                return ACTION_LEFT
+            elif self.current_room == "start_room" and self.phase == "go_exit":
+                return ACTION_RIGHT
+            elif self.current_room == "start_room" and self.phase == "go_key_room":
+                return ACTION_LEFT
+            elif self.current_room == "start_room" and self.phase == "go_exit":
+                return ACTION_RIGHT
+            elif self.current_room == "key_room" and self.phase == "go_exit":
+                return ACTION_RIGHT
+            elif self.current_room == "key_room" and self.phase == "open_chest":
+                return ACTION_LEFT
 
         # 1.2 当前房间
         door_pos = state["doors_tile"]
@@ -119,16 +127,6 @@ class Task3Policy:
             self.steps_since_phase_change = 0
 
         action = self._execute_phase(player_pos)
-
-        # if self._step_count < 20:
-        #     print("=== TASK3 DEBUG ===")
-        #     print("step:", self._step_count)
-        #     print("phase:", self.phase)
-        #     print("player:", state["player_tile"])
-        #     print("monsters_all:", state["monsters_all"], "remaining:", state["monsters_remaining"])
-        #     print("chests_all:", state["chests_all"], "remaining:", state["chests_remaining"])
-        #     print("doors_all:", state["doors_all"])
-        #     print("action:", action)
 
         # 安全检查
         if action is None or not isinstance(action, int):
@@ -208,6 +206,9 @@ class Task3Policy:
             if self.current_room == "key_room":
                 self.phase = "open_chest"
                 self.steps_since_phase_change = 0
+            if self.current_room == "monster_hall" and self.monster_killed == False:
+                self.phase = "kill_monster"
+                self.steps_since_phase_change = 0
 
         elif self.phase == "open_chest":
             if self.has_key:
@@ -268,13 +269,13 @@ class Task3Policy:
             return ACTION_LEFT
 
         if is_adjacent(player_pos, self.monster_pos):
-            if self.direction == 0 and self.monster_pos[0] > player_pos[0]:
-                return ACTION_ATTACK
             if self.direction == 1 and self.monster_pos[0] < player_pos[0]:
                 return ACTION_ATTACK
-            if self.direction == 2 and self.monster_pos[1] < player_pos[1]:
+            elif self.direction == 3 and self.monster_pos[1] > player_pos[1]:
                 return ACTION_ATTACK
-            if self.direction == 3 and self.monster_pos[1] > player_pos[1]:
+            elif self.direction == 0 and self.monster_pos[0] > player_pos[0]:
+                return ACTION_ATTACK
+            elif self.direction == 2 and self.monster_pos[1] < player_pos[1]:
                 return ACTION_ATTACK
 
         return self._move_towards(player_pos, self.monster_pos)
@@ -314,7 +315,7 @@ class Task3Policy:
         dx = target[0] - current[0]
         dy = target[1] - current[1]
 
-        if dx >= dy:
+        if abs(dx) >= abs(dy):
             if dx > 0:
                 return ACTION_RIGHT
             elif dx < 0:
