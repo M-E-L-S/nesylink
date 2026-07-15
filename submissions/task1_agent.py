@@ -29,27 +29,6 @@ GRID_HEIGHT = 8
 TURN_SETTLE_STEPS = 8
 EXIT_PUSH_STEPS = 24
 TASK1_NORTH_EXIT_TILES = [(4, 0), (5, 0)]
-TASK1_WALLS_BY_CHEST = {
-    (0, 3): {
-        (0, 2), (1, 2), (4, 2), (5, 2), (6, 2), (7, 2), (8, 2), (9, 2),
-        (0, 5), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5), (6, 5),
-    },
-    (2, 3): {
-        (0, 2), (4, 2), (5, 2), (6, 2), (7, 2), (8, 2), (9, 2),
-        (2, 4),
-        (0, 5), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5),
-    },
-    (7, 4): {
-        (4, 1),
-        (0, 2), (1, 2), (5, 2), (6, 2), (7, 2), (8, 2), (9, 2),
-        (0, 5), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5),
-    },
-    (3, 1): {
-        (0, 2), (1, 2), (2, 2), (6, 2), (7, 2), (8, 2), (9, 2),
-        (5, 4),
-        (0, 5), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5),
-    },
-}
 
 
 def _as_xy_tuple(value) -> tuple[int, int] | None:
@@ -159,17 +138,19 @@ class Task1Policy:
         self.exit_push_steps = 0
         self.exit_align_action: int | None = None
         self.exit_align_steps = 0
-        self.action_repeat = 1
+        self.action_repeat = 4
         self.key_chest_tile: tuple[int, int] | None = None
+        self.chest_opened = False
+        self.dynamic_blocked: set[tuple[int, int]] = set()
+        self.stuck_move_steps = 0
+        self.stuck_action: int | None = None
+        self.nudge_script: list[int] = []
 
     def act(self, obs: np.ndarray, info: dict) -> int:
+        del info
         state = self.predictor.predict_state(obs)
 
-        control = info.get("control", {}) if isinstance(info, dict) else {}
-        self.action_repeat = max(1, int(control.get("action_repeat", 1) or 1))
-
-        agent = info.get("agent", {}) if isinstance(info, dict) else {}
-        player_tile = _as_xy_tuple(agent.get("tile")) or _as_xy_tuple(state.get("player_tile"))
+        player_tile = _as_xy_tuple(state.get("player_tile"))
         if player_tile is None:
             player_tile = self.last_player_tile
         if player_tile is None:
@@ -180,18 +161,16 @@ class Task1Policy:
         walls = set(_filter_positions(state.get("walls_all", [])))
         chests = _filter_positions(state.get("chests_all", []))
         exits = _filter_positions(state.get("exits_all", []))
+        self._update_stuck_memory(player_tile)
+        walls |= self.dynamic_blocked
 
-        inventory = info.get("inventory", {}) if isinstance(info, dict) else {}
-        keys = int(inventory.get("keys", 0) or 0)
-
-        self.phase = "go_exit" if keys > 0 else "get_key"
+        if self.phase == "get_key" and not chests:
+            self.chest_opened = True
+        self.phase = "go_exit" if self.chest_opened else "get_key"
 
         if self.phase == "get_key":
             action = self._act_get_key(player_tile, chests, walls)
         else:
-            known_walls = self._known_task1_walls()
-            if known_walls is not None:
-                walls = known_walls
             action = self._act_go_exit(player_tile, exits, walls)
 
         if action is None:
@@ -199,11 +178,47 @@ class Task1Policy:
         if action is None:
             action = ACTION_WAIT
 
+        action = self._recover_if_stuck(player_tile, int(action))
         if not self._in_exit_open_loop(player_tile):
             action = self._apply_turn_settle(previous_player_tile, player_tile, int(action))
         self.last_player_tile = player_tile
         self.last_action = int(action)
         return int(action)
+
+    def _update_stuck_memory(self, player_tile: tuple[int, int]) -> None:
+        if self.last_player_tile is None or self.last_action not in MOVE_TO_DELTA:
+            self.stuck_move_steps = 0
+            self.stuck_action = None
+            return
+        if player_tile == self.last_player_tile:
+            if self.stuck_action == self.last_action:
+                self.stuck_move_steps += 1
+            else:
+                self.stuck_action = self.last_action
+                self.stuck_move_steps = 1
+        else:
+            self.stuck_move_steps = 0
+            self.stuck_action = None
+            self.nudge_script = []
+
+        if self.stuck_move_steps >= 8:
+            dx, dy = MOVE_TO_DELTA[self.last_action]
+            blocked = (player_tile[0] + dx, player_tile[1] + dy)
+            if _inside(blocked):
+                self.dynamic_blocked.add(blocked)
+
+    def _recover_if_stuck(self, player_tile: tuple[int, int], desired_action: int) -> int:
+        del player_tile
+        if self.nudge_script:
+            return self.nudge_script.pop(0)
+        if self.stuck_move_steps < 4 or desired_action not in MOVE_TO_DELTA:
+            return desired_action
+        if desired_action in {ACTION_UP, ACTION_DOWN}:
+            self.nudge_script = [ACTION_LEFT]
+        else:
+            self.nudge_script = [ACTION_UP]
+        self.stuck_move_steps = 0
+        return self.nudge_script.pop(0)
 
     def _in_exit_open_loop(self, player_tile: tuple[int, int]) -> bool:
         return self.phase == "go_exit" and (
@@ -250,9 +265,9 @@ class Task1Policy:
             return ACTION_WAIT
 
         target_chest = min(chests, key=lambda pos: _manhattan(player_tile, pos))
-        if target_chest in TASK1_WALLS_BY_CHEST:
-            self.key_chest_tile = target_chest
+        self.key_chest_tile = target_chest
         if _manhattan(player_tile, target_chest) == 1:
+            self.chest_opened = True
             return ACTION_A
 
         goals = {
@@ -337,16 +352,6 @@ class Task1Policy:
 
     def _ticks_to_actions(self, ticks: int) -> int:
         return max(1, int((ticks + self.action_repeat - 1) // self.action_repeat))
-
-    def _known_task1_walls(self) -> set[tuple[int, int]] | None:
-        if self.key_chest_tile is None:
-            return None
-        walls = TASK1_WALLS_BY_CHEST.get(self.key_chest_tile)
-        if walls is None:
-            return None
-        result = set(walls)
-        result.add(self.key_chest_tile)
-        return result
 
     def _greedy_fallback(
         self,

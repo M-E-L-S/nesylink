@@ -19,17 +19,6 @@ GRID_WIDTH = 10
 GRID_HEIGHT = 8
 TURN_SETTLE_STEPS = 8
 EXIT_PUSH_STEPS = 24
-TASK2_TRAPS = {
-    (x, 0) for x in range(1, 9)
-} | {
-    (x, 7) for x in range(1, 9)
-}
-TASK2_VARIANTS = {
-    "default": {"spawn": (7, 3), "chest": (1, 3), "monster": (2, 2)},
-    "spatial_a": {"spawn": (7, 4), "chest": (3, 3), "monster": (4, 2)},
-    "spatial_b": {"spawn": (6, 2), "chest": (2, 5), "monster": (5, 4)},
-    "spatial_c": {"spawn": (8, 5), "chest": (4, 3), "monster": (2, 4)},
-}
 
 MOVE_TO_DELTA = {
     ACTION_UP: (0, -1),
@@ -131,48 +120,70 @@ class Task2Policy:
         self.turn_settle_steps = 0
         self.exit_push_steps = 0
         self.exit_script: list[int] = []
+        self.exit_lane_align_steps = 0
         self.attack_cooldown = 0
-        self.action_repeat = 1
-        self.variant_name: str | None = None
+        self.action_repeat = 4
         self.monster_tile: tuple[int, int] | None = None
         self.chest_tile: tuple[int, int] | None = None
-        self.position_px: tuple[float, float] | None = None
+        self.exit_tiles: list[tuple[int, int]] = []
+        self.monster_killed = False
+        self.chest_opened = False
+        self.monster_attack_steps = 0
+        self.dynamic_blocked: set[tuple[int, int]] = set()
+        self.stuck_move_steps = 0
+        self.stuck_action: int | None = None
+        self.nudge_script: list[int] = []
 
     def act(self, obs: np.ndarray, info: dict) -> int:
+        del info
         state = self.predictor.predict_state(obs)
-        control = info.get("control", {}) if isinstance(info, dict) else {}
-        self.action_repeat = max(1, int(control.get("action_repeat", 1) or 1))
 
-        agent = info.get("agent", {}) if isinstance(info, dict) else {}
-        player_tile = _as_xy_tuple(agent.get("tile")) or _as_xy_tuple(state.get("player_tile")) or self.last_player_tile
+        player_tile = _as_xy_tuple(state.get("player_tile")) or self.last_player_tile
         if player_tile is None:
             return self.last_action
-        self.position_px = self._position_px_from_info(agent)
 
-        self._update_variant(player_tile, state)
         previous_player_tile = self.last_player_tile
-        walls: set[tuple[int, int]] = set()
-        traps = set(TASK2_TRAPS)
-        monsters = _filter_positions(state.get("monsters_all", []))
+        walls = set(_filter_positions(state.get("walls_all", [])))
+        traps = set(_filter_positions(state.get("traps_all", [])))
+        monsters = [
+            monster
+            for monster in _filter_positions(state.get("monsters_all", []))
+            if monster != player_tile
+        ]
         chests = _filter_positions(state.get("chests_all", []))
+        exits = _filter_positions(state.get("exits_all", []))
+        self._update_stuck_memory(player_tile)
+        walls |= self.dynamic_blocked
 
-        inventory = info.get("inventory", {}) if isinstance(info, dict) else {}
-        keys = int(inventory.get("keys", 0) or 0)
-        entities = info.get("entities", {}) if isinstance(info, dict) else {}
-        monsters_remaining = int(entities.get("monsters_remaining", 0) or 0)
+        if monsters:
+            self.monster_tile = min(monsters, key=lambda pos: _manhattan(player_tile, pos))
+        if chests:
+            self.chest_tile = min(chests, key=lambda pos: _manhattan(player_tile, pos))
+        if exits:
+            self.exit_tiles = exits
 
-        if monsters_remaining > 0:
+        if self.phase == "kill_monster" and self.monster_attack_steps >= 6 and not monsters:
+            self.monster_killed = True
+        if self.phase == "get_key" and not chests:
+            self.chest_opened = True
+
+        previous_phase = self.phase
+        if not self.monster_killed:
             self.phase = "kill_monster"
             action = self._act_kill_monster(player_tile, monsters, walls | traps)
-        elif keys <= 0:
+        elif not self.chest_opened:
             self.phase = "get_key"
             action = self._act_get_key(player_tile, chests, walls | traps)
         else:
             self.phase = "go_exit"
-            action = self._act_go_exit(player_tile)
+            if previous_phase != "go_exit" and self.exit_lane_align_steps <= 0:
+                self.exit_lane_align_steps = 2
+            remembered_blockers = {self.chest_tile} if self.chest_tile is not None else set()
+            action = self._act_go_exit(player_tile, walls | traps | remembered_blockers)
 
         if action is None:
             action = ACTION_WAIT
+        action = self._recover_if_stuck(player_tile, int(action))
         if self.phase not in {"go_exit", "kill_monster"}:
             action = self._apply_turn_settle(previous_player_tile, player_tile, int(action))
 
@@ -182,26 +193,40 @@ class Task2Policy:
         self.last_action = int(action)
         return int(action)
 
-    def _update_variant(self, player_tile: tuple[int, int], state: dict) -> None:
-        if self.variant_name is None:
-            for name, config in TASK2_VARIANTS.items():
-                if player_tile == config["spawn"]:
-                    self.variant_name = name
-                    break
+    def _update_stuck_memory(self, player_tile: tuple[int, int]) -> None:
+        if self.last_player_tile is None or self.last_action not in MOVE_TO_DELTA:
+            self.stuck_move_steps = 0
+            self.stuck_action = None
+            return
+        if player_tile == self.last_player_tile:
+            if self.stuck_action == self.last_action:
+                self.stuck_move_steps += 1
+            else:
+                self.stuck_action = self.last_action
+                self.stuck_move_steps = 1
+        else:
+            self.stuck_move_steps = 0
+            self.stuck_action = None
+            self.nudge_script = []
 
-        if self.variant_name is None:
-            detected_chests = set(_filter_positions(state.get("chests_all", [])))
-            for name, config in TASK2_VARIANTS.items():
-                if config["chest"] in detected_chests:
-                    self.variant_name = name
-                    break
+        if self.stuck_move_steps >= 8:
+            dx, dy = MOVE_TO_DELTA[self.last_action]
+            blocked = (player_tile[0] + dx, player_tile[1] + dy)
+            if _inside(blocked):
+                self.dynamic_blocked.add(blocked)
 
-        if self.variant_name is None:
-            self.variant_name = "default"
-
-        config = TASK2_VARIANTS[self.variant_name]
-        self.monster_tile = config["monster"]
-        self.chest_tile = config["chest"]
+    def _recover_if_stuck(self, player_tile: tuple[int, int], desired_action: int) -> int:
+        del player_tile
+        if self.nudge_script:
+            return self.nudge_script.pop(0)
+        if self.stuck_move_steps < 4 or desired_action not in MOVE_TO_DELTA:
+            return desired_action
+        if desired_action in {ACTION_UP, ACTION_DOWN}:
+            self.nudge_script = [ACTION_LEFT]
+        else:
+            self.nudge_script = [ACTION_UP]
+        self.stuck_move_steps = 0
+        return self.nudge_script.pop(0)
 
     def _apply_turn_settle(
         self,
@@ -228,7 +253,6 @@ class Task2Policy:
         monsters: list[tuple[int, int]],
         blocked: set[tuple[int, int]],
     ) -> int | None:
-        del monsters
         monster = self.monster_tile
         if monster is None:
             return ACTION_WAIT
@@ -236,12 +260,18 @@ class Task2Policy:
 
         if self.attack_cooldown > 0:
             self.attack_cooldown -= 1
+            self.monster_attack_steps += 1
+            if self.monster_attack_steps >= 6:
+                self.monster_killed = True
             return ACTION_A
 
         if distance == 1:
             facing_action = _direction_to_adjacent(player_tile, monster)
             if facing_action == self.facing_action:
                 self.attack_cooldown = 4
+                self.monster_attack_steps += 1
+                if self.monster_attack_steps >= 6 or not monsters:
+                    self.monster_killed = True
                 return ACTION_A
             return facing_action
 
@@ -258,15 +288,16 @@ class Task2Policy:
         chests: list[tuple[int, int]],
         blocked: set[tuple[int, int]],
     ) -> int | None:
-        del chests
-        chest = self.chest_tile or (1, 3)
-        if self.variant_name == "spatial_c":
-            stand = (4, 4)
-            if player_tile == stand:
-                return ACTION_A
-            return _bfs_next_action(player_tile, {stand}, blocked | {chest})
+        if chests:
+            chest = min(chests, key=lambda pos: _manhattan(player_tile, pos))
+            self.chest_tile = chest
+        else:
+            chest = self.chest_tile
+        if chest is None:
+            return ACTION_WAIT
 
         if _manhattan(player_tile, chest) == 1:
+            self.chest_opened = True
             return ACTION_A
         goals = {
             neighbor
@@ -275,37 +306,95 @@ class Task2Policy:
         }
         return _bfs_next_action(player_tile, goals, blocked | {chest})
 
-    def _act_go_exit(self, player_tile: tuple[int, int]) -> int:
+    def _act_go_exit(self, player_tile: tuple[int, int], blocked: set[tuple[int, int]]) -> int:
+        exits = [tile for tile in self.exit_tiles if tile[0] in {0, GRID_WIDTH - 1} or tile[1] in {0, GRID_HEIGHT - 1}]
+        if not exits:
+            exits = [(0, 3), (0, 4)]
+        target_exit = self._select_reachable_exit(player_tile, exits, blocked)
+        push_action = self._exit_push_action(target_exit)
+
         if self.exit_push_steps > 0:
             self.exit_push_steps -= 1
-            return ACTION_LEFT
-        if player_tile[0] <= 0 and player_tile[1] in {3, 4}:
+            return push_action
+        if self._near_exit_band(player_tile, target_exit):
             self.exit_push_steps = self._ticks_to_actions(EXIT_PUSH_STEPS)
+            return push_action
+
+        if target_exit[0] in {0, GRID_WIDTH - 1} and player_tile[1] == target_exit[1]:
+            if self.exit_lane_align_steps > 0:
+                self.exit_lane_align_steps -= 1
+                return ACTION_UP if target_exit[1] <= 3 else ACTION_DOWN
+
+        if player_tile == target_exit:
+            self.exit_push_steps = self._ticks_to_actions(EXIT_PUSH_STEPS)
+            return push_action
+
+        stand_goals = self._exit_stand_goals(target_exit, blocked)
+        action = _bfs_next_action(player_tile, stand_goals or {target_exit}, blocked)
+        if action is not None:
+            return action
+
+        return push_action
+
+    def _select_reachable_exit(
+        self,
+        player_tile: tuple[int, int],
+        exits: list[tuple[int, int]],
+        blocked: set[tuple[int, int]],
+    ) -> tuple[int, int]:
+        candidates: list[tuple[int, int, tuple[int, int]]] = []
+        for exit_tile in exits:
+            stand_goals = self._exit_stand_goals(exit_tile, blocked)
+            if not stand_goals:
+                continue
+            distance = min(_manhattan(player_tile, goal) for goal in stand_goals)
+            candidates.append((distance, _manhattan(player_tile, exit_tile), exit_tile))
+        if candidates:
+            candidates.sort()
+            return candidates[0][2]
+        return min(exits, key=lambda pos: _manhattan(player_tile, pos))
+
+    def _exit_stand_goals(
+        self,
+        exit_tile: tuple[int, int],
+        blocked: set[tuple[int, int]],
+    ) -> set[tuple[int, int]]:
+        x, y = exit_tile
+        if x == 0:
+            goals = {(1, y)}
+        elif x == GRID_WIDTH - 1:
+            goals = {(GRID_WIDTH - 2, y)}
+        elif y == 0:
+            goals = {(x, 1)}
+        elif y == GRID_HEIGHT - 1:
+            goals = {(x, GRID_HEIGHT - 2)}
+        else:
+            goals = {exit_tile}
+        return {goal for goal in goals if _inside(goal) and goal not in blocked}
+
+    def _near_exit_band(self, player_tile: tuple[int, int], exit_tile: tuple[int, int]) -> bool:
+        if exit_tile[0] == 0:
+            return player_tile[0] <= 1 and abs(player_tile[1] - exit_tile[1]) <= 1
+        if exit_tile[0] == GRID_WIDTH - 1:
+            return player_tile[0] >= GRID_WIDTH - 2 and abs(player_tile[1] - exit_tile[1]) <= 1
+        if exit_tile[1] == 0:
+            return player_tile[1] <= 1 and abs(player_tile[0] - exit_tile[0]) <= 1
+        if exit_tile[1] == GRID_HEIGHT - 1:
+            return player_tile[1] >= GRID_HEIGHT - 2 and abs(player_tile[0] - exit_tile[0]) <= 1
+        return False
+
+    def _exit_push_action(self, exit_tile: tuple[int, int]) -> int:
+        if exit_tile[0] == 0:
             return ACTION_LEFT
-
-        safe_y = 3 if self.variant_name == "spatial_b" else 4
-        if player_tile[1] < safe_y:
-            return ACTION_DOWN
-        if player_tile[1] > safe_y:
+        if exit_tile[0] == GRID_WIDTH - 1:
+            return ACTION_RIGHT
+        if exit_tile[1] == 0:
             return ACTION_UP
-
-        px_y = self.position_px[1] if self.position_px is not None else None
-        if player_tile[1] == safe_y and px_y is not None and px_y < safe_y * 16:
+        if exit_tile[1] == GRID_HEIGHT - 1:
             return ACTION_DOWN
-
         return ACTION_LEFT
 
     def _ticks_to_actions(self, ticks: int) -> int:
         return max(1, int((ticks + self.action_repeat - 1) // self.action_repeat))
-
-    def _position_px_from_info(self, agent: dict) -> tuple[float, float] | None:
-        pos = agent.get("position_px") if isinstance(agent, dict) else None
-        try:
-            if pos is not None and len(pos) >= 2:
-                return (float(pos[0]), float(pos[1]))
-        except Exception:
-            return None
-        return None
-
 
 policy = Task2Policy()
