@@ -145,6 +145,131 @@ class PixelToStatePredictor:
             return np.array([-1, -1], dtype=np.int32), best_count
         return best_xy, best_count
 
+    def _detect_task4_bridge_room_from_pixels_xy(self, pixel_obs: np.ndarray) -> dict:
+        grid_override = np.full((8, 10), -1, dtype=np.int16)
+
+        empty = {
+            "grid_override": grid_override,
+            "bridges_all": np.empty((0, 2), dtype=np.int32),
+            "gaps_all": np.empty((0, 2), dtype=np.int32),
+            "doors_all": np.empty((0, 2), dtype=np.int32),
+            "player_tile": np.array([-1, -1], dtype=np.int32),
+        }
+
+        if pixel_obs.shape != (128, 160, 3):
+            return empty
+
+        img = pixel_obs.astype(np.int16)
+        r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+
+        bridges = []
+        doors = []
+
+        player_best = np.array([-1, -1], dtype=np.int32)
+        player_best_count = 0
+
+        for ty in range(8):
+            for tx in range(10):
+                sl = np.s_[ty * 16:ty * 16 + 16, tx * 16:tx * 16 + 16]
+
+                rr = r[sl]
+                gg = g[sl]
+                bb = b[sl]
+
+                black_mask = (rr <= 30) & (gg <= 30) & (bb <= 30)
+                black_count = int(black_mask.sum())
+
+                # Bridge road: yellow lane/stripe.
+                yellow_mask = (
+                    (rr >= 150) &
+                    (gg >= 115) &
+                    (bb <= 120) &
+                    (rr > bb + 45) &
+                    (gg > bb + 30)
+                )
+
+                # Bridge road: brown plank/background.
+                brown_mask = (
+                    (rr >= 70) & (rr <= 210) &
+                    (gg >= 30) & (gg <= 150) &
+                    (bb >= 0) & (bb <= 120) &
+                    (rr > gg + 10) &
+                    (gg >= bb)
+                )
+
+                # Door frame: pink/red frame.
+                pink_mask = (
+                    (rr >= 150) &
+                    (gg <= 140) &
+                    (bb >= 90) &
+                    (rr > gg + 40) &
+                    (bb > gg + 15)
+                )
+
+                # Door interior: dark blue/purple.
+                dark_blue_mask = (
+                    (bb >= 45) &
+                    (rr <= 130) &
+                    (gg <= 130) &
+                    (bb > rr + 5)
+                )
+
+                # Player: green.
+                green_mask = (
+                    (gg >= 105) &
+                    (rr <= 130) &
+                    (bb <= 130) &
+                    (gg > rr + 25) &
+                    (gg > bb + 25)
+                )
+
+                yellow_count = int(yellow_mask.sum())
+                brown_count = int(brown_mask.sum())
+                pink_count = int(pink_mask.sum())
+                dark_blue_count = int(dark_blue_mask.sum())
+                green_count = int(green_mask.sum())
+
+                if green_count > player_best_count:
+                    player_best_count = green_count
+                    player_best = np.array([tx, ty], dtype=np.int32)
+
+                # Doors in this task are the pink-frame/dark-blue tiles.
+                if pink_count >= 8 and dark_blue_count >= 12:
+                    grid_override[ty, tx] = EXIT_ID
+                    doors.append((tx, ty))
+                    continue
+
+                # Bridge road can be mostly yellow stripe, mostly brown plank, or both.
+                # Keep this before the black rule so bridge tiles are not erased to EMPTY.
+                looks_like_bridge = (
+                    (yellow_count >= 18 and brown_count >= 12) or
+                    (yellow_count >= 35) or
+                    (brown_count >= 70 and yellow_count >= 6)
+                )
+
+                if looks_like_bridge:
+                    grid_override[ty, tx] = BRIDGE_ID
+                    bridges.append((tx, ty))
+                    continue
+
+                # Only clear almost fully black tiles. This fixes false EXIT_ID on background,
+                # but avoids wiping partially drawn bridge tiles.
+                if black_count >= 220:
+                    grid_override[ty, tx] = EMPTY_ID
+
+        if player_best_count >= 10:
+            grid_override[player_best[1], player_best[0]] = PLAYER_ID
+        else:
+            player_best = np.array([-1, -1], dtype=np.int32)
+
+        return {
+            "grid_override": grid_override,
+            "bridges_all": np.array(bridges, dtype=np.int32) if bridges else np.empty((0, 2), dtype=np.int32),
+            "gaps_all": np.empty((0, 2), dtype=np.int32),
+            "doors_all": np.array(doors, dtype=np.int32) if doors else np.empty((0, 2), dtype=np.int32),
+            "player_tile": player_best,
+        }
+
     def _collapse_side_exits_xy(self, exits: np.ndarray, max_doors: int) -> np.ndarray:
         if exits is None or len(exits) == 0:
             return np.empty((0, 2), dtype=np.int32)
@@ -298,33 +423,78 @@ class PixelToStatePredictor:
         return padded, active_mask
 
     def predict_state(
-        self,
-        pixel_obs: np.ndarray,
-        player_threshold: float = 0.25,
-        max_monsters: int = 8,
-        max_doors: int = 8,
-        max_walls: int = 80,
-        max_chests: int = 8,
-        max_buttons: int = 8,
-        max_switches: int = 8,
-        max_npcs: int = 8,
-        max_traps: int = 32,
-        max_gaps: int = 32,
-        max_bridges: int = 16,
+            self,
+            pixel_obs: np.ndarray,
+            player_threshold: float = 0.25,
+            max_monsters: int = 8,
+            max_doors: int = 8,
+            max_walls: int = 80,
+            max_chests: int = 8,
+            max_buttons: int = 8,
+            max_switches: int = 8,
+            max_npcs: int = 8,
+            max_traps: int = 32,
+            max_gaps: int = 32,
+            max_bridges: int = 16,
     ) -> dict:
         result = self.predict_grid_with_confidence(pixel_obs)
         grid = result["grid"]
         confidence = result["confidence"]
         prob = result["prob"]
 
-        player_tile, player_confidence = self._find_single_object_by_prob_xy(prob, PLAYER_ID, player_threshold)
+        player_tile, player_confidence = self._find_single_object_by_prob_xy(
+            prob,
+            PLAYER_ID,
+            player_threshold,
+        )
+
+        task4_detected = self._detect_task4_bridge_room_from_pixels_xy(pixel_obs)
+        grid_override = task4_detected["grid_override"]
+        override_mask = grid_override >= 0
+
+        if override_mask.any():
+            grid = grid.copy()
+            grid[override_mask] = grid_override[override_mask].astype(np.uint8)
+
+        if int(task4_detected["player_tile"][0]) >= 0:
+            player_tile = task4_detected["player_tile"]
+            player_confidence = 1.0
+
         walls_all = self._find_all_objects_from_grid_xy(grid, WALL_ID)
         traps_all = self._find_all_objects_from_grid_xy(grid, TRAP_ID)
         buttons_all = self._find_all_objects_from_grid_xy(grid, BUTTON_ID)
         npcs_all = self._find_all_objects_from_grid_xy(grid, NPC_ID)
-        gaps_all = self._find_all_objects_from_grid_xy(grid, GAP_ID)
-        bridges_all = self._find_all_objects_from_grid_xy(grid, BRIDGE_ID)
-        switches_all = self._find_all_objects_from_grid_xy(grid, SWITCH_ID)
+
+        gaps_all = self._find_objects_by_grid_or_prob_xy(
+            grid=grid,
+            prob=prob,
+            class_id=GAP_ID,
+            max_count=max_gaps,
+            prob_threshold=0.10,
+            grid_threshold=0.08,
+        )
+
+        bridges_all = self._find_objects_by_grid_or_prob_xy(
+            grid=grid,
+            prob=prob,
+            class_id=BRIDGE_ID,
+            max_count=max_bridges,
+            prob_threshold=0.10,
+            grid_threshold=0.08,
+        )
+
+        # Task4 bridge pixels are more reliable than CNN argmax/prob for this scene.
+        if "bridges_all" in task4_detected and len(task4_detected["bridges_all"]) > 0:
+            bridges_all = task4_detected["bridges_all"][:max_bridges]
+
+        switches_all = self._find_objects_by_grid_or_prob_xy(
+            grid=grid,
+            prob=prob,
+            class_id=SWITCH_ID,
+            max_count=max_switches,
+            prob_threshold=0.10,
+            grid_threshold=0.08,
+        )
 
         monsters_model = self._find_objects_by_grid_or_prob_xy(
             grid=grid,
@@ -334,37 +504,42 @@ class PixelToStatePredictor:
             prob_threshold=0.18,
             grid_threshold=0.18,
         )
-        chests_model = self._find_objects_by_grid_or_prob_xy(grid, prob, CHEST_ID, max_chests, 0.18, 0.18)
-        exits_all = self._find_objects_by_grid_or_prob_xy(grid, prob, EXIT_ID, max_doors, 0.12, 0.12)
+        chests_model = self._find_objects_by_grid_or_prob_xy(
+            grid,
+            prob,
+            CHEST_ID,
+            max_chests,
+            0.18,
+            0.18,
+        )
 
-        # if self._looks_like_redraw_obs(pixel_obs):
-        #     redraw_detected = self._detect_redraw_geometry_from_pixels_xy(pixel_obs, max_monsters, max_chests, max_walls)
-        #     # print("=== INFER REDRAW DEBUG ===")
-        #     # print("redraw player:", redraw_detected["player_tile"])
-        #     # print("redraw monsters:", redraw_detected["monsters_all"])
-        #     # print("redraw chests:", redraw_detected["chests_all"])
-        #     # print("redraw exits:", redraw_detected["exits_all"])
-        #     # print("redraw walls count:", len(redraw_detected["walls_all"]))
-        #     # print("cnn exits before clear:", exits_all)
-        #
-        #     if int(redraw_detected["player_tile"][0]) >= 0:
-        #         player_tile = redraw_detected["player_tile"]
-        #         player_confidence = 1.0
-        #     if len(redraw_detected["walls_all"]) >= 4:
-        #         walls_all = redraw_detected["walls_all"]
-        #
-        #     monsters_all = self._merge_positions_xy(redraw_detected["monsters_all"], monsters_model, max_monsters)
-        #     chests_all = self._merge_positions_xy(redraw_detected["chests_all"], chests_model, max_chests)
-        #     exits_all = redraw_detected["exits_all"]
-        #     if len(exits_all) == 0:
-        #         exits_all = self._infer_side_doors_from_walls_xy(walls_all, max_doors)
-        # else:
+        exits_all = self._find_objects_by_grid_or_prob_xy(
+            grid,
+            prob,
+            EXIT_ID,
+            max_doors,
+            0.12,
+            0.12,
+        )
+
+        # In task4, the pink-frame/dark-blue objects are doors, not switches.
+        if "doors_all" in task4_detected and len(task4_detected["doors_all"]) > 0:
+            exits_all = task4_detected["doors_all"][:max_doors]
+
         monsters_all = monsters_model
         chests_all = chests_model
-
         doors_all = exits_all
-        mechanisms_all = self._find_all_objects_from_grid_multi_id_xy(grid, [BUTTON_ID, SWITCH_ID])
-        bridge_tiles_all = self._find_all_objects_from_grid_multi_id_xy(grid, [GAP_ID, BRIDGE_ID])
+
+        mechanisms_all = self._find_all_objects_from_grid_multi_id_xy(
+            grid,
+            [BUTTON_ID, SWITCH_ID],
+        )
+
+        bridge_tiles_all = self._merge_positions_xy(
+            gaps_all,
+            bridges_all,
+            max_gaps + max_bridges,
+        )
 
         monsters_tile, monsters_active_mask = self._pad_positions(monsters_all, max_monsters)
         doors_tile, doors_active_mask = self._pad_positions(doors_all, max_doors)
@@ -381,7 +556,12 @@ class PixelToStatePredictor:
         chests_remaining = int(len(chests_all))
         doors_remaining = int(len(doors_all))
         traps_active = int(len(traps_all))
-        is_bridge_room = bool(len(gaps_all) > 0 or len(bridges_all) > 0 or len(switches_all) > 0)
+
+        is_bridge_room = bool(
+            len(gaps_all) > 0 or
+            len(bridges_all) > 0 or
+            len(switches_all) > 0
+        )
 
         return {
             "grid": grid,
