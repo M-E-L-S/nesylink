@@ -32,6 +32,9 @@ structure SymbolicState where
   chestWest : Bool
   steps : Nat
   hp : Nat
+  monsterCenter : Bool
+  monsterWest1 : Bool
+  monsterWest2 : Bool
   deriving DecidableEq, Repr
 
 def manhattan (a b : Position) : Nat :=
@@ -101,6 +104,18 @@ theorem applyInteract_safe (s : SymbolicState) (hs : isSafeTileB s.room s.player
         · exact hs
         · exact hs
 
+def applyAttack (s : SymbolicState) : SymbolicState :=
+-- 翻译怪物攻击逻辑
+  let mC := if s.room == Room.center ∧ manhattan s.player (7, 4) ≤ 1 then false else s.monsterCenter
+  let mW1 := if s.room == Room.west ∧ manhattan s.player (2, 4) ≤ 1 then false else s.monsterWest1
+  let mW2 := if s.room == Room.west ∧ manhattan s.player (6, 3) ≤ 1 then false else s.monsterWest2
+  { s with monsterCenter := mC, monsterWest1 := mW1, monsterWest2 := mW2 }
+
+theorem applyAttack_safe (s : SymbolicState) :
+    isSafeTileB (applyAttack s).room (applyAttack s).player = isSafeTileB s.room s.player := by
+  unfold applyAttack
+  rfl
+
 def applyTriggers (s : SymbolicState) : SymbolicState :=
 -- 翻译了按钮的触发逻辑
   if s.room == Room.center ∧ s.player == (2, 6) then
@@ -145,7 +160,7 @@ def stepFn (s : SymbolicState) (a : Action) : SymbolicState :=
   let s_time := { s with steps := nxt_steps, hp := nxt_hp }
   let s_act := match a with
   | Action.interact => applyInteract s_time
-  | Action.attack => s_time
+  | Action.attack => applyAttack s_time
   | Action.wait => s_time
   | _ =>
       let (nr, np, nk) := getNextPosAndKeys s_time a
@@ -277,7 +292,8 @@ def t5Init : SymbolicState :=
   { room := Room.center, player := (1, 1), buttonPressed := false,
     keys := 0, gold := 0, heals := 0,
     chestCenter := false, chestSouth := false, chestEast := false, chestWest := false,
-    steps := 0, hp := 5 }
+    steps := 0, hp := 5
+    monsterCenter := true, monsterWest1 := true, monsterWest2 := true}
 
 def GoalReached (s : SymbolicState) : Prop :=
   s.chestWest = true ∧ s.gold = 7 ∧ s.room = Room.west ∧ s.hp > 0
@@ -305,7 +321,7 @@ def t5Phase5_GoNorth : List Action :=
   List.replicate 4 Action.up ++ List.replicate 4 Action.left ++ [Action.up, Action.up]
 
 def t5Phase6_GoEast : List Action :=
-  List.replicate 2 Action.up ++ List.replicate 5 Action.right ++ [Action.right]
+  List.replicate 2 Action.up ++ List.replicate 2 Action.right ++ [Action.attack, Action.attack] ++ List.replicate 4 Action.right
 
 def t5Phase7_EastChest : List Action :=
   List.replicate 3 Action.up ++ List.replicate 6 Action.right ++ [Action.interact]
@@ -317,12 +333,50 @@ def t5Phase9_GoWest : List Action :=
   List.replicate 8 Action.left ++ [Action.left]
 
 def t5Phase10_WestChest : List Action :=
-  List.replicate 6 Action.left ++ List.replicate 2 Action.down ++ [Action.interact]
+  [Action.up] ++ [Action.left] ++ [Action.attack, Action.attack] ++ List.replicate 5 Action.left ++ [Action.down, Action.attack, Action.attack] ++ List.replicate 2 Action.down ++ [Action.interact]
 
 def t5FullPlan : List Action :=
   t5Phase1_CenterChest ++ t5Phase2_PressButton ++ t5Phase3_GoSouth ++ t5Phase4_SouthChest ++
   t5Phase5_GoNorth ++ t5Phase6_GoEast ++ t5Phase7_EastChest ++ t5Phase8_ReturnCenter ++
   t5Phase9_GoWest ++ t5Phase10_WestChest
+
+theorem exec_append {s1 s2 s3 : SymbolicState} {p1 p2 : List Action}
+    (h1 : Exec s1 p1 s2) (h2 : Exec s2 p2 s3) : Exec s1 (p1 ++ p2) s3 := by
+  induction h1 with
+  | nil => exact h2
+  | cons hstep hrest ih =>
+      apply Exec.cons hstep
+      exact ih h2
+
+theorem task5_completable_if_subplans_exist
+    (s0 s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 : SymbolicState)
+    (h1 : Exec s0 t5Phase1_CenterChest s1)
+    (h2 : Exec s1 t5Phase2_PressButton s2)
+    (h3 : Exec s2 t5Phase3_GoSouth s3)
+    (h4 : Exec s3 t5Phase4_SouthChest s4)
+    (h5 : Exec s4 t5Phase5_GoNorth s5)
+    (h6 : Exec s5 t5Phase6_GoEast s6)
+    (h7 : Exec s6 t5Phase7_EastChest s7)
+    (h8 : Exec s7 t5Phase8_ReturnCenter s8)
+    (h9 : Exec s8 t5Phase9_GoWest s9)
+    (h10 : Exec s9 t5Phase10_WestChest s10)
+    (hGoal : GoalReached s10) : TaskCompletable s0 := by
+  have h_0_10 : Exec s0 (t5Phase1_CenterChest ++ t5Phase2_PressButton ++ t5Phase3_GoSouth ++
+                         t5Phase4_SouthChest ++ t5Phase5_GoNorth ++ t5Phase6_GoEast ++
+                         t5Phase7_EastChest ++ t5Phase8_ReturnCenter ++ t5Phase9_GoWest ++
+                         t5Phase10_WestChest) s10 := by
+    apply exec_append h1
+    apply exec_append h2
+    apply exec_append h3
+    apply exec_append h4
+    apply exec_append h5
+    apply exec_append h6
+    apply exec_append h7
+    apply exec_append h8
+    apply exec_append h9
+    exact h10
+
+  exact ⟨t5FullPlan, s10, h_0_10, hGoal⟩
 
 set_option maxRecDepth 6000
 theorem task5_concrete_completable : TaskCompletable t5Init := by

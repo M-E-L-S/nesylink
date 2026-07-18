@@ -265,8 +265,36 @@ def t4FullPlan : List Action :=
   t4Phase1_Key ++ t4Phase2_Bridge1 ++ t4Phase3_Sword ++
   t4Phase4_Bridge2 ++ t4Phase5_Monster ++ t4Phase6_Victory
 
-set_option maxRecDepth 4000
+theorem exec_append
+    {s t u : SymbolicState} {p q : List Action}
+    (hp : Exec s p t) (hq : Exec t q u) : Exec s (p ++ q) u := by
+  induction hp with
+  | nil => exact hq
+  | cons hstep _ ih => exact Exec.cons hstep (ih hq)
 
+theorem task4_completable_if_subplans_exist
+    {s0 s1 s2 s3 s4 s5 s6 : SymbolicState}
+    (hInit : s0 = t4Init)
+    (h1 : Exec s0 t4Phase1_Key s1)
+    (h2 : Exec s1 t4Phase2_Bridge1 s2)
+    (h3 : Exec s2 t4Phase3_Sword s3)
+    (h4 : Exec s3 t4Phase4_Bridge2 s4)
+    (h5 : Exec s4 t4Phase5_Monster s5)
+    (h6 : Exec s5 t4Phase6_Victory s6)
+    (hGoal : GoalReached s6) :
+    TaskCompletable t4Init := by
+  subst hInit
+  unfold TaskCompletable
+
+  have h12    := exec_append h1 h2
+  have h123   := exec_append h12 h3
+  have h1234  := exec_append h123 h4
+  have h12345 := exec_append h1234 h5
+  have hFull  := exec_append h12345 h6
+  exact ⟨_, s6, hFull, hGoal⟩
+
+set_option maxRecDepth 4000
+-- 放宽decide的迭代层数
 theorem task4_concrete_completable : TaskCompletable t4Init := by
   have hExec : Exec t4Init t4FullPlan (runPlanFn t4Init t4FullPlan) :=
     exec_of_runPlanFn rfl

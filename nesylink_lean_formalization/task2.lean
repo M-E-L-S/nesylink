@@ -323,14 +323,48 @@ theorem t2_exec_to_exit : Exec t2AfterChest t2ToExit t2Final := by
   iterate 2 (apply Exec.cons; exact step_move_compute (by decide) rfl (by decide))
   exact Exec.nil
 
+theorem task2_completable_if_subplans_exist
+    {init nearMonster afterMonster nearChest afterChest final : SymbolicState}
+    {toMonster attacks toChest interacts toExit : List Action}
+    (hToMonster : Exec init toMonster nearMonster)
+    (hAttacks : Exec nearMonster attacks afterMonster)
+    (hToChest : Exec afterMonster toChest nearChest)
+    (hInteract : Exec nearChest interacts afterChest)
+    (hToExit : Exec afterChest toExit final)
+    (hGoalKeys : final.keys > 0)
+    (hGoalMonster : final.monsterHp == 0)
+    (hGoalExit : final.player.1 == 0) :
+    TaskCompletable init := by
+  have hPhase1 := exec_append hToMonster hAttacks
+  have hPhase2 := exec_append hPhase1 hToChest
+  have hPhase3 := exec_append hPhase2 hInteract
+  have hAll := exec_append hPhase3 hToExit
+  have hGoal : GoalReached final := ⟨hGoalKeys, hGoalMonster, hGoalExit⟩
+  exact ⟨toMonster ++ attacks ++ toChest ++ interacts ++ toExit, final, hAll, hGoal⟩
+
 def t2FullPlan : List Action :=
   t2ToMonster ++ t2Attacks ++ t2ToChest ++ t2Interact ++ t2ToExit
 
 theorem task2_concrete_completable : TaskCompletable t2Init := by
-  have h1 := exec_append t2_exec_to_monster t2_exec_attacks
-  have h2 := exec_append h1 t2_exec_to_chest
-  have h3 := exec_append h2 t2_exec_interact
-  have h4 := exec_append h3 t2_exec_to_exit
-  exact ⟨t2FullPlan, t2Final, h4, by unfold GoalReached; decide⟩
+  exact task2_completable_if_subplans_exist
+    (init := t2Init)
+    (nearMonster := t2NearMonster)
+    (afterMonster := t2AfterMonster)
+    (nearChest := t2NearChest)
+    (afterChest := t2AfterChest)
+    (final := t2Final)
+    (toMonster := t2ToMonster)
+    (attacks := t2Attacks)
+    (toChest := t2ToChest)
+    (interacts := t2Interact)
+    (toExit := t2ToExit)
+    t2_exec_to_monster
+    t2_exec_attacks
+    t2_exec_to_chest
+    t2_exec_interact
+    t2_exec_to_exit
+    (by decide)
+    (by decide)
+    (by decide)
 
 end Task2Formalization

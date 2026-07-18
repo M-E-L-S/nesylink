@@ -38,7 +38,7 @@ def adjacent (a b : Position) : Prop := manhattan a b = 1
 def inBounds (p : Position) : Prop := p.1 < 10 ∧ p.2 < 8
 
 def applyMove (r : Room) (p : Position) (a : Action) : Room × Position :=
--- 特殊的房间切换机制
+-- 特殊的门房间切换机制
   match r, a with
   | Room.startRoom, Action.left =>
       if p.1 == 0 then (Room.monsterHall, (8, 4)) else (r, (p.1 - 1, p.2))
@@ -337,6 +337,7 @@ def t3Init : SymbolicState :=
 def t3Monster : Room × Position := (Room.monsterHall, (5, 3))
 def t3Chest : Room × Position := (Room.keyRoom, (5, 4))
 
+--构造可行解
 def t3ToMonster : List Action :=
   [Action.left, Action.left, Action.left, Action.left, Action.left, Action.left, Action.left, Action.left]
 
