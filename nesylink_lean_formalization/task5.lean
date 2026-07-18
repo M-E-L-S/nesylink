@@ -1,10 +1,14 @@
 /-!
-  A Complete Lean 4 formalization for Task 5
-  Includes Wall Collisions, 200-Step HP Decay, Spatial Button Triggers, and Zero `sorry` Proofs.
+  这是Task5的针对性lean建模和策略证明。
+  对应task5 - 状态机/BFS搜索agent的实现。
+  完整包含了Task5涉及到的环境建模，证明了安全性、可达性、BFS完备性。
 -/
 
 namespace Task5Formalization
 
+/-!
+  基本环境建模
+-/
 abbrev Position := Nat × Nat
 
 inductive Room where
@@ -15,10 +19,6 @@ inductive Action where
   | wait | up | down | left | right | interact | attack
   deriving DecidableEq, Repr
 
-/-!
-  State tracks the player's room, local position, key inventory, gold/heals,
-  boolean flags for objectives, plus the 200-step HP decay mechanics.
--/
 structure SymbolicState where
   room : Room
   player : Position
@@ -39,10 +39,8 @@ def manhattan (a b : Position) : Nat :=
   let dy := if a.2 ≤ b.2 then b.2 - a.2 else a.2 - b.2
   dx + dy
 
-/-!
-  Precise coordinate mapping for '#' walls according to the JSON layouts.
--/
 def isWall (r : Room) (p : Position) : Bool :=
+-- 墙体硬编码
   match r, p with
   | Room.center, (5, 1) => true
   | Room.center, (5, 2) => true
@@ -70,15 +68,12 @@ def isWall (r : Room) (p : Position) : Bool :=
 
 def isSafeTileB (r : Room) (p : Position) : Bool :=
   if p.1 ≥ 10 ∨ p.2 ≥ 8 then false
-  else if r == Room.south ∧ p == (1, 5) then false -- Trap
+  else if r == Room.south ∧ p == (1, 5) then false -- 陷阱硬编码
   else if isWall r p then false
   else true
 
-/-!
-  Pure item/flag logic update, rigidly preserving structural room/player equality.
-  The Button logic is removed from here since it is triggered by location, not interaction.
--/
 def applyInteract (s : SymbolicState) : SymbolicState :=
+-- 翻译宝箱交互逻辑
   if s.room == Room.center then
     let (c1, g1) := if ¬s.chestCenter ∧ manhattan s.player (4, 2) ≤ 1 then (true, s.gold + 2) else (s.chestCenter, s.gold)
     { s with chestCenter := c1, gold := g1 }
@@ -106,10 +101,8 @@ theorem applyInteract_safe (s : SymbolicState) (hs : isSafeTileB s.room s.player
         · exact hs
         · exact hs
 
-/-!
-  Passive Environment Triggers (e.g., stepping on a button tile).
--/
 def applyTriggers (s : SymbolicState) : SymbolicState :=
+-- 翻译了按钮的触发逻辑
   if s.room == Room.center ∧ s.player == (2, 6) then
     { s with buttonPressed := true }
   else s
@@ -122,10 +115,11 @@ theorem applyTriggers_safe (s : SymbolicState) :
   · rfl
 
 def getNextPosAndKeys (s : SymbolicState) (a : Action) : Room × Position × Nat :=
+-- 翻译门的传送逻辑
   if a == Action.down ∧ s.room == Room.center ∧ s.player == (4, 7) ∧ s.buttonPressed then
     (Room.south, (4, 1), s.keys)
   else if a == Action.up ∧ s.room == Room.south ∧ s.player == (4, 0) then
-    (Room.center, (4, 1), s.keys)
+    (Room.center, (4, 6), s.keys)
   else if a == Action.right ∧ s.room == Room.center ∧ s.player == (9, 4) ∧ s.keys > 0 then
     (Room.east, (1, 4), s.keys - 1)
   else if a == Action.left ∧ s.room == Room.east ∧ s.player == (0, 4) then
@@ -146,7 +140,8 @@ def getNextPosAndKeys (s : SymbolicState) (a : Action) : Room × Position × Nat
 
 def stepFn (s : SymbolicState) (a : Action) : SymbolicState :=
   let nxt_steps := s.steps + 1
-  let nxt_hp := if nxt_steps % 200 == 0 then s.hp - 1 else s.hp
+  let nxt_hp := if nxt_steps % 33 == 0 then s.hp - 1 else s.hp
+  -- 因为lean按格子简化，而实际游戏每6步移动一格，所以这里的200步扣血折算为约33步扣血。
   let s_time := { s with steps := nxt_steps, hp := nxt_hp }
   let s_act := match a with
   | Action.interact => applyInteract s_time
@@ -158,13 +153,10 @@ def stepFn (s : SymbolicState) (a : Action) : SymbolicState :=
         { s_time with room := nr, player := np, keys := nk }
       else
         s_time
-  -- Environmental mechanics trigger automatically after the action resolves
   applyTriggers s_act
 
 /-!
-  =============================================================================
-  Part 1: Relational Specification & Zero-Sorry Safety Invariants
-  =============================================================================
+  Part 1: 安全性
 -/
 
 inductive Step : SymbolicState → Action → SymbolicState → Prop where
@@ -192,16 +184,14 @@ theorem safe_step_preserves_safe_state {s t : SymbolicState} {a : Action}
     · assumption
     · exact hs
 
+/-!
+  Part 2: BFS完备性
+-/
+
 inductive Exec : SymbolicState → List Action → SymbolicState → Prop where
   | nil {s : SymbolicState} : Exec s [] s
   | cons {s t u : SymbolicState} {a : Action} {rest : List Action} :
       Step s a t → Exec t rest u → Exec s (a :: rest) u
-
-/-!
-  =============================================================================
-  Part 2: Full BFS Completeness Theory
-  =============================================================================
--/
 
 def BoundedReachable (init : SymbolicState) (n : Nat) (target : SymbolicState) : Prop :=
   ∃ plan, plan.length ≤ n ∧ Exec init plan target
@@ -280,9 +270,7 @@ theorem bfs_frontier_complete (init : SymbolicState) (n : Nat) :
   exact runPlanFn_mem_bfsVisited_of_mem plan hs hlen
 
 /-!
-  =============================================================================
-  Part 3: Executable Proof of Reachability (Wall-Avoidance Routing)
-  =============================================================================
+  Part 3: 可达性
 -/
 
 def t5Init : SymbolicState :=
@@ -300,14 +288,10 @@ instance {s : SymbolicState} : Decidable (GoalReached s) :=
 def TaskCompletable (s : SymbolicState) : Prop :=
   ∃ plan final, Exec s plan final ∧ GoalReached final
 
-/-
-  Strict 10-phase paths updated to thread the needle through complex wall geometries.
-  The total step count is heavily optimized to keep HP safely above zero.
--/
+-- 构造可行解
 def t5Phase1_CenterChest : List Action :=
   List.replicate 3 Action.right ++ [Action.down, Action.interact]
 
--- Notice: Action.interact has been removed. Simply moving to the tile automatically sets buttonPressed = true
 def t5Phase2_PressButton : List Action :=
   List.replicate 2 Action.left ++ List.replicate 4 Action.down
 
@@ -320,11 +304,9 @@ def t5Phase4_SouthChest : List Action :=
 def t5Phase5_GoNorth : List Action :=
   List.replicate 4 Action.up ++ List.replicate 4 Action.left ++ [Action.up, Action.up]
 
--- Wall at (5,1) avoided by pathing via (2,1) -> (2,4)
 def t5Phase6_GoEast : List Action :=
-  List.replicate 2 Action.left ++ List.replicate 3 Action.down ++ List.replicate 7 Action.right ++ [Action.right]
+  List.replicate 2 Action.up ++ List.replicate 5 Action.right ++ [Action.right]
 
--- Wall at (2,4) in East room avoided by pathing via (1,1)
 def t5Phase7_EastChest : List Action :=
   List.replicate 3 Action.up ++ List.replicate 6 Action.right ++ [Action.interact]
 
@@ -342,7 +324,6 @@ def t5FullPlan : List Action :=
   t5Phase5_GoNorth ++ t5Phase6_GoEast ++ t5Phase7_EastChest ++ t5Phase8_ReturnCenter ++
   t5Phase9_GoWest ++ t5Phase10_WestChest
 
--- Validated instantly via computable reflection with zero `sorry`
 set_option maxRecDepth 6000
 theorem task5_concrete_completable : TaskCompletable t5Init := by
   have hExec : Exec t5Init t5FullPlan (runPlanFn t5Init t5FullPlan) :=
