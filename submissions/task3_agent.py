@@ -26,27 +26,33 @@ class Task3Policy:
         """重置状态机"""
         self.phase = "go_monster_hall"
         self.current_room = None
-        self.grid = None
         self.path = []
         self.steps_since_phase_change = 0
         self.max_steps_per_phase = 200
         self.direction = 0
         self.monsters_remaining = 0
         self.chests_remaining = 0
-        self.door_locked = True  # 有锁的门默认在右边
-
+        self.switches_remaining = 0
+        self.is_bridge_room = True
 
         # 目标位置（使用 tile 坐标）
         self.monster_pos = None
         self.chest_pos = None
+        self.switches_pos = None
+        self.bridge_pos = None
         self.door_pos_left = [11, 11]
         self.door_pos_right = [11, 11]
 
         # 状态追踪
-        self.door_step = 0
+        self.room_change = True
+        self.buffer_step = 0
         self.monster_killed = False
         self.has_key = False
+        self.has_item = False
+        self.switches_state = 0
+        self.switches_size = 3
         self._step_count = 0
+        self._last_player_pos = [7,4]
         self._last_action = ACTION_RIGHT
         self._info = None
 
@@ -118,7 +124,7 @@ class Task3Policy:
         self.chest_pos = self._first_valid_tile(state.get("chests_tile", []))
 
         # ============ 3. 更新阶段 ============
-        self._update_phase(info)
+        self._update_phase(info,player_pos)
 
         # ============ 4. 执行当前阶段 ============
         self.steps_since_phase_change += 1
@@ -142,6 +148,7 @@ class Task3Policy:
             self.direction = 2
         if action == ACTION_DOWN:
             self.direction = 3
+        self._last_player_pos = player_pos
         self._last_action = action
         return action
 
@@ -180,16 +187,22 @@ class Task3Policy:
         except Exception:
             return default
 
-    def _update_phase(self, info):
+    def _update_phase(self, info,player_pos):
         """根据当前状态更新阶段"""
 
-        if self.monsters_remaining > 0:
-            room = "monster_hall"
-        elif self.chests_remaining > 0:
-            room = "key_room"
-        else:
-            room = "start_room"
+        if manhattan_distance(player_pos, self._last_player_pos) > 4:
+            self.room_change = True
+        room = self.current_room
+        if self.room_change:
+            if self.monsters_remaining > 0:
+                room = "monster_hall"
+            # monster识别有误
+            elif self.chests_remaining > 0:
+                room = "key_room"
+            else:
+                room = "start_room"
         self.current_room = room
+        self.room_change = False
 
         # 状态机转换
         if self.phase == "go_monster_hall":
@@ -243,14 +256,8 @@ class Task3Policy:
 
         if target_room == "monster_hall":
             target = self.door_pos_left
-            if self.door_step > 20:
-                self.door_locked = False
-                target = self.door_pos_right
         elif target_room == "key_room":
-            if self.door_locked:
                 target = self.door_pos_left
-            else:
-                target = self.door_pos_right
         else:
             target = (4, y)
 
@@ -302,10 +309,7 @@ class Task3Policy:
         """回出口离开"""
         if self.door_pos_right is None:
             return ACTION_RIGHT
-        if self.door_locked:
-            return self._move_towards(player_pos, self.door_pos_right)
-        else:
-            return self._move_towards(player_pos, self.door_pos_left)
+        return self._move_towards(player_pos, self.door_pos_right)
 
     def _move_towards(self, current, target, door=False) -> int:
         """直接向目标移动"""
@@ -342,7 +346,6 @@ class Task3Policy:
                     return ACTION_LEFT
                 else:
                     if door:
-                        self.door_step += 1
                         return ACTION_LEFT
                     else:
                         return ACTION_RIGHT
